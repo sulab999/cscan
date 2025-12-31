@@ -30,7 +30,7 @@ git clone https://github.com/tangxiaofeng7/cscan.git
 cd cscan
 docker-compose up -d
 
-#适配arm架构
+#适配arm64架构
 docker-compose -f docker-compose-arm64.yaml up -d
 ```
 
