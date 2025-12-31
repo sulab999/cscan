@@ -1,0 +1,111 @@
+services:
+  # Redis 缓存服务
+  redis:
+   image: arm64v8/redis:7-bookworm
+   container_name: cscan_redis
+   command: redis-server --appendonly yes
+   volumes:
+    - cscan_redis_data:/data
+   environment:
+    - TZ=Asia/Shanghai
+   restart: unless-stopped
+   networks:
+    - cscan_network
+   healthcheck:  
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # MongoDB 数据库
+  mongodb:
+    image: arm64v8/mongo:6
+    container_name: cscan_mongodb
+    volumes:
+      - cscan_mongodb_data:/data/db
+      - ./docker/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    environment:
+      - TZ=Asia/Shanghai
+    restart: unless-stopped
+    networks:
+      - cscan_network
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # CSCAN API 服务
+  cscan-api:
+    image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan:api-arm64-latest
+    container_name: cscan_api
+    environment:
+      - TZ=Asia/Shanghai
+      - MONGO_URI=mongodb://mongodb:27017
+      - REDIS_HOST=redis:6379
+    volumes:
+      - ./poc:/app/poc:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - cscan_network
+
+  # CSCAN RPC 服务
+  cscan-rpc:
+    image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan:rpc-arm64-latest
+    container_name: cscan_rpc
+    environment:
+      - TZ=Asia/Shanghai
+      - MONGO_URI=mongodb://mongodb:27017
+      - REDIS_HOST=redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+      mongodb:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - cscan_network
+
+  # CSCAN Worker 扫描节点 (可扩展)
+  cscan-worker:
+    image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan:worker-arm64-latest
+    environment:
+      - TZ=Asia/Shanghai
+      - SERVER_ADDR=cscan-rpc:9000
+      - REDIS_ADDR=redis:6379
+    depends_on:
+      - cscan-rpc
+    restart: unless-stopped
+    networks:
+      - cscan_network
+    deploy:
+      replicas: 1
+
+  # CSCAN Web 前端
+  cscan-web:
+    image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan:web-arm64-latest
+    container_name: cscan_web
+    environment:
+      - TZ=Asia/Shanghai
+    ports:
+      - "3000:80"
+    depends_on:
+      - cscan-api
+    restart: unless-stopped
+    networks:
+      - cscan_network
+
+volumes:
+  cscan_redis_data:
+    driver: local
+  cscan_mongodb_data:
+    driver: local
+
+networks:
+  cscan_network:
+    driver: bridge

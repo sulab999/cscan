@@ -29,6 +29,9 @@
 git clone https://github.com/tangxiaofeng7/cscan.git
 cd cscan
 docker-compose up -d
+
+#适配arm架构
+docker-compose -f docker-compose-arm64.yaml up -d
 ```
 
 访问 `http://localhost:3000`，默认账号 `admin / 123456`
