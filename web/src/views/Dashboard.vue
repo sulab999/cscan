@@ -463,7 +463,7 @@ function formatTime(timeStr) {
 }
 
 function getSeverityType(severity) {
-  const map = { critical: 'danger', high: 'warning', medium: '', low: 'info', info: 'success' }
+  const map = { critical: 'danger', high: 'warning', medium: '', low: 'info', info: 'success', unknown: 'info' }
   return map[severity] || 'info'
 }
 

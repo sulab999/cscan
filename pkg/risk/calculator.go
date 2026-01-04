@@ -8,7 +8,7 @@ import (
 // VulInfo represents the vulnerability information needed for risk calculation.
 // This is a simplified struct to avoid circular dependencies with the model package.
 type VulInfo struct {
-	Severity  string  // critical, high, medium, low, info
+	Severity  string  // critical, high, medium, low, info, unknown
 	CvssScore float64 // 0.0 - 10.0
 }
 
@@ -20,6 +20,7 @@ var SeverityWeight = map[string]float64{
 	"medium":   4.0,
 	"low":      1.0,
 	"info":     0.1,
+	"unknown":  0.5,
 }
 
 // RiskLevel constants
@@ -29,6 +30,7 @@ const (
 	RiskLevelMedium   = "medium"
 	RiskLevelLow      = "low"
 	RiskLevelInfo     = "info"
+	RiskLevelUnknown  = "unknown"
 )
 
 // Risk level thresholds

@@ -27,7 +27,7 @@
         <el-table-column prop="target" label="扫描目标" min-width="200" show-overflow-tooltip />
         <el-table-column prop="status" label="状态" width="120">
           <template #default="{ row }">
-            <el-tag :type="getStatusType(row.status)">{{ getStatusText(row) }}</el-tag>
+            <el-tag :type="getStatusType(row.status, row)">{{ getStatusText(row) }}</el-tag>
           </template>
         </el-table-column>
         <el-table-column prop="progress" label="进度" width="150">
@@ -85,18 +85,23 @@
     </el-card>
 
     <!-- 任务详情对话框 -->
-    <el-dialog v-model="detailVisible" title="任务详情" width="800px">
+    <el-dialog v-model="detailVisible" title="任务详情" width="850px">
       <el-descriptions :column="2" border>
         <el-descriptions-item label="任务名称">{{ currentTask.name }}</el-descriptions-item>
         <el-descriptions-item label="状态">
-          <el-tag :type="getStatusType(currentTask.status)">{{ getStatusText(currentTask) }}</el-tag>
+          <el-tag :type="getStatusType(currentTask.status, currentTask)">{{ getStatusText(currentTask) }}</el-tag>
         </el-descriptions-item>
         <el-descriptions-item label="进度">
-          <el-progress :percentage="currentTask.progress" :stroke-width="10" style="width: 150px" />
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <el-progress :percentage="currentTask.progress" :stroke-width="10" style="width: 120px" />
+            <span style="color: #909399; font-size: 12px;">{{ currentTask.subTaskDone || 0 }}/{{ currentTask.subTaskCount || 0 }}</span>
+          </div>
         </el-descriptions-item>
         <el-descriptions-item label="创建时间">{{ currentTask.createTime }}</el-descriptions-item>
         <el-descriptions-item label="开始时间">{{ currentTask.startTime || '-' }}</el-descriptions-item>
-        <el-descriptions-item label="结束时间">{{ currentTask.endTime || '-' }}</el-descriptions-item>
+        <el-descriptions-item label="结束时间">
+          {{ (currentTask.status === 'SUCCESS' || currentTask.status === 'FAILURE' || currentTask.status === 'STOPPED') ? (currentTask.endTime || '-') : '-' }}
+        </el-descriptions-item>
         <el-descriptions-item label="扫描目标" :span="2">
           <div style="max-height: 100px; overflow-y: auto; white-space: pre-wrap">{{ currentTask.target }}</div>
         </el-descriptions-item>
@@ -135,9 +140,19 @@
             </el-tag>
           </el-descriptions-item>
           <el-descriptions-item label="任务拆分">
-            {{ parsedConfig.batchSize || 50 }} 个/批
+            {{ parsedConfig.batchSize === 0 ? '不拆分' : ((parsedConfig.batchSize || 50) + ' 个/批') }}
           </el-descriptions-item>
         </el-descriptions>
+        
+        <!-- 子域名扫描配置 -->
+        <div v-if="parsedConfig.domainscan?.enable" class="config-detail">
+          <el-descriptions :column="4" border size="small" title="子域名扫描配置">
+            <el-descriptions-item label="使用Subfinder">{{ parsedConfig.domainscan?.subfinder !== false ? '是' : '否' }}</el-descriptions-item>
+            <el-descriptions-item label="超时时间">{{ parsedConfig.domainscan?.timeout || 300 }}秒</el-descriptions-item>
+            <el-descriptions-item label="并发线程">{{ parsedConfig.domainscan?.threads || 10 }}</el-descriptions-item>
+            <el-descriptions-item label="DNS解析">{{ parsedConfig.domainscan?.resolveDNS ? '是' : '否' }}</el-descriptions-item>
+          </el-descriptions>
+        </div>
         
         <!-- 端口扫描配置 -->
         <div v-if="parsedConfig.portscan?.enable !== false" class="config-detail">
@@ -146,6 +161,17 @@
             <el-descriptions-item label="端口范围">{{ parsedConfig.portscan?.ports || 'top100' }}</el-descriptions-item>
             <el-descriptions-item label="扫描速率">{{ parsedConfig.portscan?.rate || 1000 }}</el-descriptions-item>
             <el-descriptions-item label="端口阈值">{{ parsedConfig.portscan?.portThreshold || 100 }}</el-descriptions-item>
+            <el-descriptions-item label="扫描类型">{{ parsedConfig.portscan?.scanType === 's' ? 'SYN' : 'CONNECT' }}</el-descriptions-item>
+            <el-descriptions-item label="超时时间">{{ parsedConfig.portscan?.timeout || 60 }}秒</el-descriptions-item>
+            <el-descriptions-item label="跳过主机发现">{{ parsedConfig.portscan?.skipHostDiscovery ? '是' : '否' }}</el-descriptions-item>
+          </el-descriptions>
+        </div>
+        
+        <!-- 端口识别配置 -->
+        <div v-if="parsedConfig.portidentify?.enable" class="config-detail">
+          <el-descriptions :column="3" border size="small" title="端口识别配置">
+            <el-descriptions-item label="超时时间">{{ parsedConfig.portidentify?.timeout || 30 }}秒</el-descriptions-item>
+            <el-descriptions-item label="额外参数">{{ parsedConfig.portidentify?.args || '-' }}</el-descriptions-item>
           </el-descriptions>
         </div>
         
@@ -160,15 +186,28 @@
             <el-descriptions-item label="Icon Hash">{{ parsedConfig.fingerprint?.iconHash ? '是' : '否' }}</el-descriptions-item>
             <el-descriptions-item label="自定义指纹">{{ parsedConfig.fingerprint?.customEngine ? '是' : '否' }}</el-descriptions-item>
             <el-descriptions-item label="网页截图">{{ parsedConfig.fingerprint?.screenshot ? '是' : '否' }}</el-descriptions-item>
+            <el-descriptions-item label="超时时间">{{ parsedConfig.fingerprint?.timeout || 30 }}秒</el-descriptions-item>
+            <el-descriptions-item label="并发数">{{ parsedConfig.fingerprint?.concurrency || 10 }}</el-descriptions-item>
           </el-descriptions>
         </div>
         
         <!-- 漏洞扫描配置 -->
         <div v-if="parsedConfig.pocscan?.enable" class="config-detail">
           <el-descriptions :column="3" border size="small" title="漏洞扫描配置">
-            <el-descriptions-item label="自动扫描">{{ parsedConfig.pocscan?.autoScan ? '是' : '否' }}</el-descriptions-item>
+            <el-descriptions-item label="POC来源">
+              {{ parsedConfig.pocscan?.customPocOnly ? '仅自定义POC' : '默认模板+自定义POC' }}
+            </el-descriptions-item>
+            <el-descriptions-item label="自动扫描(自定义标签)">{{ parsedConfig.pocscan?.autoScan ? '是' : '否' }}</el-descriptions-item>
+            <el-descriptions-item label="自动扫描(内置映射)">{{ parsedConfig.pocscan?.automaticScan ? '是' : '否' }}</el-descriptions-item>
             <el-descriptions-item label="严重级别">{{ parsedConfig.pocscan?.severity || 'critical,high,medium' }}</el-descriptions-item>
             <el-descriptions-item label="目标超时">{{ parsedConfig.pocscan?.targetTimeout || 600 }}秒</el-descriptions-item>
+            <el-descriptions-item label="并发数">{{ parsedConfig.pocscan?.concurrency || 25 }}</el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.pocscan?.nucleiTemplateIds?.length" label="指定Nuclei模板" :span="3">
+              {{ parsedConfig.pocscan.nucleiTemplateIds.length }} 个
+            </el-descriptions-item>
+            <el-descriptions-item v-if="parsedConfig.pocscan?.customPocIds?.length" label="指定自定义POC" :span="3">
+              {{ parsedConfig.pocscan.customPocIds.length }} 个
+            </el-descriptions-item>
           </el-descriptions>
         </div>
       </div>
@@ -448,7 +487,7 @@
       <div class="log-progress" v-if="currentLogTask">
         <div class="progress-info">
           <span class="task-name">{{ currentLogTask.name }}</span>
-          <el-tag :type="getStatusType(currentLogTask.status)" size="small">{{ currentLogTask.status }}</el-tag>
+          <el-tag :type="getStatusType(currentLogTask.status, currentLogTask)" size="small">{{ getStatusText(currentLogTask) }}</el-tag>
         </div>
         <el-progress :percentage="currentLogTask.progress" :status="currentLogTask.status === 'SUCCESS' ? 'success' : (currentLogTask.status === 'FAILURE' ? 'exception' : '')" :stroke-width="12" />
       </div>
@@ -679,26 +718,58 @@ async function loadWorkers() {
   } catch (e) { console.error('Failed to load workers:', e) }
 }
 
-function getStatusType(status) {
-  const map = { CREATED: 'info', PENDING: 'warning', STARTED: 'primary', PAUSED: 'warning', SUCCESS: 'success', FAILURE: 'danger', STOPPED: 'info' }
-  return map[status] || 'info'
+function getStatusType(status, row) {
+  const map = { CREATED: 'info', PENDING: 'warning', STARTED: 'primary', PAUSED: 'warning', SUCCESS: 'success', FAILURE: 'danger', STOPPED: 'info', REVOKED: 'info' }
+  
+  // 如果有状态值，直接返回映射
+  if (status && map[status]) {
+    return map[status]
+  }
+  
+  // 如果状态为空，根据进度推断状态类型
+  if (!status && row) {
+    if (row.progress >= 100 || (row.subTaskCount > 0 && row.subTaskDone >= row.subTaskCount)) {
+      return 'success'
+    }
+    if (row.progress > 0 || row.subTaskDone > 0) {
+      return 'primary'
+    }
+    return 'info'
+  }
+  
+  return 'info'
 }
 
-// 获取状态显示文本（显示当前阶段而不是状态单词）
+// 获取状态显示文本（简化状态显示，不按扫描模块显示）
 function getStatusText(row) {
   const statusMap = {
     CREATED: '待启动',
     PENDING: '等待执行',
+    STARTED: '执行中',
     PAUSED: '已暂停',
     SUCCESS: '已完成',
     FAILURE: '执行失败',
-    STOPPED: '已停止'
+    STOPPED: '已停止',
+    REVOKED: '已取消'
   }
-  // 如果是执行中状态，显示当前阶段
-  if (row.status === 'STARTED') {
-    return row.currentPhase || '执行中'
+  
+  // 如果有状态值，直接返回映射
+  if (row?.status && statusMap[row.status]) {
+    return statusMap[row.status]
   }
-  return statusMap[row.status] || row.status
+  
+  // 如果状态为空，根据进度推断状态
+  if (!row?.status) {
+    if (row?.progress >= 100 || (row?.subTaskCount > 0 && row?.subTaskDone >= row?.subTaskCount)) {
+      return '已完成'
+    }
+    if (row?.progress > 0 || row?.subTaskDone > 0) {
+      return '执行中'
+    }
+    return '待启动'
+  }
+  
+  return row?.status || '未知'
 }
 
 // 解析任务配置

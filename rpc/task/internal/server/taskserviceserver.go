@@ -130,3 +130,9 @@ func (s *TaskServiceServer) GetSubfinderProviders(ctx context.Context, in *pb.Ge
 	l := logic.NewGetSubfinderProvidersLogic(ctx, s.svcCtx)
 	return l.GetSubfinderProviders(in)
 }
+
+// 递增子任务完成数（模块级别）
+func (s *TaskServiceServer) IncrSubTaskDone(ctx context.Context, in *pb.IncrSubTaskDoneReq) (*pb.IncrSubTaskDoneResp, error) {
+	l := logic.NewIncrSubTaskDoneLogic(ctx, s.svcCtx)
+	return l.IncrSubTaskDone(in)
+}

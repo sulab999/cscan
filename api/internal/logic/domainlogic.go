@@ -244,19 +244,53 @@ func (l *DomainLogic) DomainStat(workspaceId string) (*types.DomainStatResp, err
 	return resp, nil
 }
 
-// DomainDelete 删除域名（实际删除对应的资产）
+// DomainDelete 删除域名（删除该域名对应的所有资产）
 func (l *DomainLogic) DomainDelete(req *types.DomainDeleteReq, workspaceId string) (*types.BaseResp, error) {
 	workspaceIds := common.GetWorkspaceIds(l.ctx, l.svcCtx, workspaceId)
 
+	// 先通过ID找到域名值
+	var domainName string
 	for _, wsId := range workspaceIds {
 		assetModel := model.NewAssetModel(l.svcCtx.MongoDB, wsId)
-		err := assetModel.Delete(l.ctx, req.Id)
-		if err == nil {
-			return &types.BaseResp{Code: 0, Msg: "删除成功"}, nil
+		asset, err := assetModel.FindById(l.ctx, req.Id)
+		if err == nil && asset != nil {
+			// 获取域名值
+			domainName = asset.Domain
+			if domainName == "" {
+				domainName = asset.Host
+			}
+			if domainName == "" {
+				domainName = asset.Authority
+			}
+			break
 		}
 	}
 
-	return &types.BaseResp{Code: 500, Msg: "删除失败"}, nil
+	if domainName == "" || common.IsIPAddress(domainName) {
+		return &types.BaseResp{Code: 500, Msg: "删除失败，域名不存在"}, nil
+	}
+
+	// 删除所有包含该域名的资产
+	var totalDeleted int64
+	for _, wsId := range workspaceIds {
+		assetModel := model.NewAssetModel(l.svcCtx.MongoDB, wsId)
+		// 构建查询条件：匹配domain、host或authority等于该域名的资产
+		filter := bson.M{
+			"$or": []bson.M{
+				{"domain": domainName},
+				{"host": domainName},
+				{"authority": bson.M{"$regex": "^" + domainName + "(:|$)"}},
+			},
+		}
+		deleted, _ := assetModel.DeleteByFilter(l.ctx, filter)
+		totalDeleted += deleted
+	}
+
+	if totalDeleted == 0 {
+		return &types.BaseResp{Code: 500, Msg: "删除失败"}, nil
+	}
+
+	return &types.BaseResp{Code: 0, Msg: "删除成功"}, nil
 }
 
 // DomainBatchDelete 批量删除域名
@@ -266,13 +300,55 @@ func (l *DomainLogic) DomainBatchDelete(req *types.DomainBatchDeleteReq, workspa
 	}
 
 	workspaceIds := common.GetWorkspaceIds(l.ctx, l.svcCtx, workspaceId)
-	var totalDeleted int64
-
+	
+	// 先收集所有要删除的域名值
+	domainNames := make(map[string]bool)
 	for _, wsId := range workspaceIds {
 		assetModel := model.NewAssetModel(l.svcCtx.MongoDB, wsId)
-		deleted, _ := assetModel.BatchDelete(l.ctx, req.Ids)
+		for _, id := range req.Ids {
+			asset, err := assetModel.FindById(l.ctx, id)
+			if err == nil && asset != nil {
+				domainName := asset.Domain
+				if domainName == "" {
+					domainName = asset.Host
+				}
+				if domainName == "" {
+					domainName = asset.Authority
+				}
+				if domainName != "" && !common.IsIPAddress(domainName) {
+					domainNames[domainName] = true
+				}
+			}
+		}
+	}
+
+	if len(domainNames) == 0 {
+		return &types.BaseResp{Code: 500, Msg: "删除失败，未找到匹配的域名"}, nil
+	}
+
+	// 构建域名列表
+	domains := make([]string, 0, len(domainNames))
+	for d := range domainNames {
+		domains = append(domains, d)
+	}
+
+	// 删除所有包含这些域名的资产
+	var totalDeleted int64
+	for _, wsId := range workspaceIds {
+		assetModel := model.NewAssetModel(l.svcCtx.MongoDB, wsId)
+		filter := bson.M{
+			"$or": []bson.M{
+				{"domain": bson.M{"$in": domains}},
+				{"host": bson.M{"$in": domains}},
+			},
+		}
+		deleted, _ := assetModel.DeleteByFilter(l.ctx, filter)
 		totalDeleted += deleted
 	}
 
-	return &types.BaseResp{Code: 0, Msg: "成功删除 " + strconv.FormatInt(totalDeleted, 10) + " 条域名"}, nil
+	if totalDeleted == 0 {
+		return &types.BaseResp{Code: 500, Msg: "删除失败"}, nil
+	}
+
+	return &types.BaseResp{Code: 0, Msg: "成功删除 " + strconv.FormatInt(int64(len(domainNames)), 10) + " 个域名"}, nil
 }

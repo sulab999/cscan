@@ -29,76 +29,33 @@
 git clone https://github.com/tangxiaofeng7/cscan.git
 cd cscan
 docker-compose up -d
-
-#适配arm64架构
-docker-compose -f docker-compose-arm64.yaml up -d
 ```
 
 访问 `http://localhost:3000`，默认账号 `admin / 123456`
 </details>
 
 <details>
-<summary>⭐ 截图 </summary>
+<summary>⭐ 本地开发 </summary>
 
-#### 工作台
-<img src="images/index.png" alt="工作台" width="600"/>
+```bash
+# 1. 启动依赖服务（MongoDB + Redis）
+docker-compose -f docker-compose.dev.yaml up -d
 
-#### 任务管理
-<img src="images/task.png" alt="任务管理" width="600"/>
+# 2. 启动 RPC 服务
+go run rpc/task/task.go -f rpc/task/etc/task.yaml
 
-#### 资产管理
-<img src="images/asset.png" alt="资产管理" width="600"/>
+# 3. 启动 API 服务
+go run api/cscan.go -f api/etc/cscan.yaml
 
-#### 扫描日志
-<img src="images/process.png" alt="扫描日志" width="600"/>
+# 4. 启动 Worker
+# 从Web界面获取安装密钥
+go run cmd/worker/main.go -k <install_key> -s http://localhost:8888
 
-#### 查看报告
-<img src="images/report.png" alt="查看报告" width="600"/>
-
-#### POC管理
-<img src="images/poc.png" alt="POC管理" width="600"/>
-
-#### 指纹管理
-<img src="images/finger.png" alt="指纹管理" width="600"/>
-</details>
-
-<details>
-<summary>⭐ 架构 </summary>
-
-```
-Vue3 Web ──▶ API Server ──▶ MongoDB
-                │
-                ▼
-              Redis
-                │
-                ▼
-            RPC Server
-                │
-    ┌───────────┼───────────┐
-    ▼           ▼           ▼
- Worker 1   Worker 2   Worker N
+# 5. 启动前端
+cd web; npm install; npm run dev
 ```
 
-| 组件 | 技术栈 |
-|------|--------|
-| 后端框架 | Go-Zero, gRPC, JWT |
-| 数据存储 | MongoDB, Redis |
-| 前端框架 | Vue 3, Element Plus, Vite |
-| 端口扫描 | Nmap, Masscan, Naabu |
-| 指纹识别 | Httpx, Wappalyzer, 自定义引擎 |
-| 漏洞扫描 | Nuclei |
-| 截图引擎 | Httpx, Chromedp (Chromium) |
-</details>
-
-<details>
-<summary>⭐ 参考 </summary>
-
-- [go-zero](https://github.com/zeromicro/go-zero) - 微服务框架
-- [Nuclei](https://github.com/projectdiscovery/nuclei) - 漏洞扫描引擎
-- [Httpx](https://github.com/projectdiscovery/httpx) - HTTP 探测工具
-- [Naabu](https://github.com/projectdiscovery/naabu) - 端口扫描器
-- [Wappalyzer](https://github.com/projectdiscovery/wappalyzergo) - 指纹识别
-- [nemo_go](https://github.com/hanc00l/nemo_go) - 参考项目
+访问 `http://localhost:3000`，默认账号 `admin / 123456`
 </details>
 
 ## License

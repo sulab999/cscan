@@ -1,5 +1,5 @@
 services:
-  # Redis 缓存服务
+  # Redis 
   redis:
     image: redis:7-alpine
     container_name: cscan_redis
@@ -17,7 +17,7 @@ services:
       timeout: 5s
       retries: 3
 
-  # MongoDB 数据库
+  # MongoDB 
   mongodb:
     image: mongo:6
     container_name: cscan_mongodb
@@ -41,10 +41,8 @@ services:
     container_name: cscan_api
     environment:
       - TZ=Asia/Shanghai
-      - MONGO_URI=mongodb://mongodb:27017
-      - REDIS_HOST=redis:6379
-    volumes:
-      - ./poc:/app/poc:ro
+    ports:
+      - "8888:8888"
     depends_on:
       redis:
         condition: service_healthy
@@ -60,8 +58,6 @@ services:
     container_name: cscan_rpc
     environment:
       - TZ=Asia/Shanghai
-      - MONGO_URI=mongodb://mongodb:27017
-      - REDIS_HOST=redis:6379
     depends_on:
       redis:
         condition: service_healthy
@@ -71,29 +67,14 @@ services:
     networks:
       - cscan_network
 
-  # CSCAN Worker 扫描节点 (可扩展)
-  cscan-worker:
-    image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan:worker-latest
-    environment:
-      - TZ=Asia/Shanghai
-      - SERVER_ADDR=cscan-rpc:9000
-      - REDIS_ADDR=redis:6379
-    depends_on:
-      - cscan-rpc
-    restart: unless-stopped
-    networks:
-      - cscan_network
-    deploy:
-      replicas: 1
-
-  # CSCAN Web 前端
+  # CSCAN Web 
   cscan-web:
     image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan:web-latest
     container_name: cscan_web
     environment:
       - TZ=Asia/Shanghai
     ports:
-      - "${WEB_PORT:-3000}:80"
+      - "3000:80"
     depends_on:
       - cscan-api
     restart: unless-stopped

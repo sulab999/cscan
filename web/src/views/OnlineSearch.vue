@@ -4,7 +4,7 @@
     <el-card class="search-card">
       <el-form :model="store.searchForm" inline>
         <el-form-item label="数据源">
-          <el-select v-model="store.searchForm.source" style="width: 120px">
+          <el-select v-model="store.searchForm.source" style="width: 120px" @change="handleSourceChange">
             <el-option label="Fofa" value="fofa" />
             <el-option label="Hunter" value="hunter" />
             <el-option label="Quake" value="quake" />
@@ -23,7 +23,7 @@
             <el-option :value="10" label="10" />
             <el-option :value="50" label="50" />
             <el-option :value="100" label="100" />
-            <el-option :value="500" label="500" />
+            <el-option v-if="store.searchForm.source === 'fofa'" :value="500" label="500" />
           </el-select>
         </el-form-item>
         <el-form-item>
@@ -175,6 +175,13 @@ function applyQuickQuery(item) {
   store.searchForm.query = item.query
 }
 
+// 数据源切换时，如果当前数量超过限制则自动调整
+function handleSourceChange() {
+  if (store.searchForm.source !== 'fofa' && store.searchForm.size > 100) {
+    store.searchForm.size = 100
+  }
+}
+
 async function handleImport() {
   await ElMessageBox.confirm(`确定将当前页 ${tableData.value.length} 条数据导入到资产库吗？`, '提示')
   
@@ -193,19 +200,25 @@ async function handleImportAll() {
     return
   }
 
+  // 计算预计导入数量
+  const estimatedCount = total.value
+  
   await ElMessageBox.confirm(
-    `确定导入全部资产吗？将自动遍历所有页面（最多10页），预计导入约 ${Math.min(total.value, store.searchForm.size * 10)} 条数据`,
+    `确定导入全部资产吗？将自动遍历所有页面，预计导入约 ${estimatedCount} 条数据`,
     '导入全部资产',
     { type: 'warning' }
   )
 
   importAllLoading.value = true
   try {
+    // Hunter 和 Quake 单次最大 100，Fofa 可以 500
+    const pageSize = store.searchForm.source === 'fofa' ? store.searchForm.size : Math.min(store.searchForm.size, 100)
+    
     const res = await request.post('/onlineapi/importAll', {
       platform: store.searchForm.source,
       query: store.searchForm.query,
-      pageSize: store.searchForm.size,
-      maxPages: 10
+      pageSize: pageSize,
+      maxPages: 0  // 0 表示不限制页数
     })
 
     if (res.code === 0) {

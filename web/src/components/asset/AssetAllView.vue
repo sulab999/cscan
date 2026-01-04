@@ -82,6 +82,7 @@
       <div class="search-actions">
         <el-button type="primary" @click="handleSearch">搜索</el-button>
         <el-button @click="handleReset">重置</el-button>
+        <el-button type="danger" plain @click="handleClear">清空数据</el-button>
       </div>
     </el-card>
 
@@ -90,12 +91,25 @@
       <div class="table-header">
         <span class="total-info">共 {{ pagination.total }} 条记录</span>
         <div class="table-actions">
+          <el-button type="primary" size="small" @click="showImportDialog">
+            导入资产
+          </el-button>
           <el-button type="danger" size="small" :disabled="selectedRows.length === 0" @click="handleBatchDelete">
             批量删除 ({{ selectedRows.length }})
           </el-button>
-          <el-button type="danger" size="small" plain @click="handleClear">
-            清空数据
-          </el-button>
+          <el-dropdown style="margin-left: 10px" @command="handleExport">
+            <el-button type="success" size="small">
+              导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="selected-target" :disabled="selectedRows.length === 0">导出选中目标 ({{ selectedRows.length }})</el-dropdown-item>
+                <el-dropdown-item command="selected-url" :disabled="selectedRows.length === 0">导出选中URL ({{ selectedRows.length }})</el-dropdown-item>
+                <el-dropdown-item divided command="all-target">导出全部目标</el-dropdown-item>
+                <el-dropdown-item command="all-url">导出全部URL</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </div>
       <el-table :data="tableData" v-loading="loading" stripe size="small" max-height="500" @selection-change="handleSelectionChange">
@@ -378,13 +392,43 @@
         <el-button @click="historyDetailVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- 导入资产对话框 -->
+    <el-dialog v-model="importDialogVisible" title="导入资产" width="600px">
+      <el-form label-width="80px">
+        <el-form-item label="目标列表">
+          <el-input
+            v-model="importTargets"
+            type="textarea"
+            :rows="12"
+            placeholder="每行一个目标，支持以下格式：
+• IP:端口 (如 192.168.1.1:80)
+• URL (如 http://example.com:8080)
+• 域名 (如 example.com，默认80端口)
+• https://example.com (默认443端口)"
+          />
+        </el-form-item>
+        <el-form-item>
+          <div class="import-tips">
+            <span>共 {{ importTargetCount }} 个目标</span>
+          </div>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="importDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="handleImport" :loading="importLoading" :disabled="importTargetCount === 0">
+          导入
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { getAssetList, getAssetStat, batchDeleteAsset, clearAsset } from '@/api/asset'
+import { ArrowDown } from '@element-plus/icons-vue'
+import { getAssetList, getAssetStat, batchDeleteAsset, clearAsset, importAsset } from '@/api/asset'
 import { useWorkspaceStore } from '@/stores/workspace'
 import request from '@/api/request'
 
@@ -411,6 +455,15 @@ const currentHistoryAsset = ref(null)
 const historyDetailVisible = ref(false)
 const currentHistoryDetail = ref(null)
 const historyDetailTab = ref('header')
+
+// 导入相关
+const importDialogVisible = ref(false)
+const importTargets = ref('')
+const importLoading = ref(false)
+const importTargetCount = computed(() => {
+  if (!importTargets.value.trim()) return 0
+  return importTargets.value.trim().split('\n').filter(line => line.trim()).length
+})
 
 const stat = reactive({ topPorts: [], topService: [], topApp: [], topIconHash: [] })
 const searchForm = reactive({ host: '', port: null, service: '', title: '', app: '', orgId: '', onlyUpdated: false, iconHash: '' })
@@ -594,6 +647,120 @@ function showHistoryDetail(row) {
   historyDetailVisible.value = true
 }
 
+// 显示导入对话框
+function showImportDialog() {
+  importTargets.value = ''
+  importDialogVisible.value = true
+}
+
+// 执行导入
+async function handleImport() {
+  if (!importTargets.value.trim()) {
+    ElMessage.warning('请输入要导入的目标')
+    return
+  }
+  
+  const targets = importTargets.value.trim().split('\n').filter(line => line.trim())
+  if (targets.length === 0) {
+    ElMessage.warning('请输入要导入的目标')
+    return
+  }
+  
+  importLoading.value = true
+  try {
+    const res = await importAsset({ targets })
+    if (res.code === 0) {
+      ElMessage.success(res.msg || '导入成功')
+      importDialogVisible.value = false
+      loadData()
+      loadStat()
+      emit('data-changed')
+    } else {
+      ElMessage.error(res.msg || '导入失败')
+    }
+  } catch (e) {
+    ElMessage.error('导入失败: ' + e.message)
+  } finally {
+    importLoading.value = false
+  }
+}
+
+// 导出功能
+async function handleExport(command) {
+  let data = []
+  let filename = ''
+  
+  if (command === 'selected-target' || command === 'selected-url') {
+    if (selectedRows.value.length === 0) {
+      ElMessage.warning('请先选择要导出的资产')
+      return
+    }
+    data = selectedRows.value
+    filename = command === 'selected-target' ? 'asset_targets_selected.txt' : 'asset_urls_selected.txt'
+  } else {
+    ElMessage.info('正在获取全部数据...')
+    try {
+      const res = await getAssetList({
+        ...searchForm, page: 1, pageSize: 10000
+      })
+      if (res.code === 0) {
+        data = res.list || []
+      } else {
+        ElMessage.error('获取数据失败')
+        return
+      }
+    } catch (e) {
+      ElMessage.error('获取数据失败')
+      return
+    }
+    filename = command === 'all-target' ? 'asset_targets_all.txt' : 'asset_urls_all.txt'
+  }
+  
+  if (data.length === 0) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+  
+  const seen = new Set()
+  const exportData = []
+  
+  if (command.includes('target')) {
+    for (const row of data) {
+      const target = row.authority || (row.host + ':' + row.port)
+      if (target && !seen.has(target)) {
+        seen.add(target)
+        exportData.push(target)
+      }
+    }
+  } else {
+    for (const row of data) {
+      const scheme = row.service === 'https' || row.port === 443 ? 'https' : 'http'
+      const url = `${scheme}://${row.host}:${row.port}`
+      if (!seen.has(url)) {
+        seen.add(url)
+        exportData.push(url)
+      }
+    }
+  }
+  
+  if (exportData.length === 0) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+  
+  const blob = new Blob([exportData.join('\n')], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  
+  ElMessage.success(`成功导出 ${exportData.length} 条数据`)
+}
+
 async function handleClear() {
   await ElMessageBox.confirm('确定清空所有资产数据吗？此操作不可恢复！', '警告', { type: 'error', confirmButtonText: '确定清空', cancelButtonText: '取消' })
   const res = await clearAsset()
@@ -724,7 +891,7 @@ function handleIconError(event) {
 }
 
 function getSeverityType(severity) {
-  const map = { critical: 'danger', high: 'danger', medium: 'warning', low: 'info', info: 'success' }
+  const map = { critical: 'danger', high: 'danger', medium: 'warning', low: 'info', info: 'success', unknown: 'info' }
   return map[severity?.toLowerCase()] || 'info'
 }
 
@@ -887,6 +1054,12 @@ defineExpose({ refresh })
       border-radius: 4px;
       border: 1px solid var(--el-border-color-lighter);
     }
+  }
+  
+  // 导入提示样式
+  .import-tips {
+    color: var(--el-text-color-secondary);
+    font-size: 13px;
   }
 }
 </style>

@@ -3,6 +3,8 @@ package logic
 import (
 	"context"
 	"encoding/base64"
+	"fmt"
+	"net"
 	"regexp"
 	"sort"
 	"strconv"
@@ -678,4 +680,217 @@ func (l *AssetHistoryLogic) AssetHistory(req *types.AssetHistoryReq, workspaceId
 		Msg:  "success",
 		List: list,
 	}, nil
+}
+
+// AssetImportLogic 导入资产
+type AssetImportLogic struct {
+	logx.Logger
+	ctx    context.Context
+	svcCtx *svc.ServiceContext
+}
+
+func NewAssetImportLogic(ctx context.Context, svcCtx *svc.ServiceContext) *AssetImportLogic {
+	return &AssetImportLogic{
+		Logger: logx.WithContext(ctx),
+		ctx:    ctx,
+		svcCtx: svcCtx,
+	}
+}
+
+func (l *AssetImportLogic) AssetImport(req *types.AssetImportReq, workspaceId string) (resp *types.AssetImportResp, err error) {
+	if len(req.Targets) == 0 {
+		return &types.AssetImportResp{Code: 400, Msg: "请输入要导入的目标"}, nil
+	}
+
+	assetModel := l.svcCtx.GetAssetModel(workspaceId)
+	
+	var newCount, skipCount, errorCount int
+	var errorDetails []string
+	total := 0
+
+	for _, target := range req.Targets {
+		target = strings.TrimSpace(target)
+		if target == "" {
+			continue
+		}
+		total++
+
+		host, port, scheme, err := parseTarget(target)
+		if err != nil {
+			errorCount++
+			errorDetails = append(errorDetails, fmt.Sprintf("%s: %s", target, err.Error()))
+			continue
+		}
+
+		// 检查是否已存在
+		existing, _ := assetModel.FindByHostPort(l.ctx, host, port)
+		if existing != nil {
+			skipCount++
+			continue
+		}
+
+		// 创建新资产
+		authority := host + ":" + strconv.Itoa(port)
+		asset := &model.Asset{
+			Authority: authority,
+			Host:      host,
+			Port:      port,
+			Service:   scheme,
+			IsHTTP:    scheme == "http" || scheme == "https",
+			Source:    "import",
+		}
+
+		if err := assetModel.Insert(l.ctx, asset); err != nil {
+			errorCount++
+			errorDetails = append(errorDetails, fmt.Sprintf("%s: 保存失败", target))
+			continue
+		}
+		newCount++
+	}
+
+	if total == 0 {
+		return &types.AssetImportResp{Code: 400, Msg: "没有有效的目标"}, nil
+	}
+
+	msg := "导入完成"
+	if newCount > 0 {
+		msg += fmt.Sprintf("，新增 %d 条", newCount)
+	}
+	if skipCount > 0 {
+		msg += fmt.Sprintf("，跳过 %d 条（已存在）", skipCount)
+	}
+	if errorCount > 0 {
+		msg += fmt.Sprintf("，失败 %d 条（格式错误）", errorCount)
+		// 最多显示前3个错误详情
+		if len(errorDetails) > 0 {
+			maxShow := 3
+			if len(errorDetails) < maxShow {
+				maxShow = len(errorDetails)
+			}
+			msg += "：" + strings.Join(errorDetails[:maxShow], "；")
+			if len(errorDetails) > maxShow {
+				msg += fmt.Sprintf("...等%d条", len(errorDetails))
+			}
+		}
+	}
+
+	return &types.AssetImportResp{
+		Code:       0,
+		Msg:        msg,
+		Total:      total,
+		NewCount:   newCount,
+		SkipCount:  skipCount,
+		ErrorCount: errorCount,
+	}, nil
+}
+
+// parseTarget 解析目标字符串，支持 IP:端口、URL、域名 格式
+func parseTarget(target string) (host string, port int, scheme string, err error) {
+	target = strings.TrimSpace(target)
+	
+	if target == "" {
+		return "", 0, "", fmt.Errorf("目标不能为空")
+	}
+	
+	// 处理 URL 格式
+	if strings.HasPrefix(target, "http://") || strings.HasPrefix(target, "https://") {
+		// 解析 URL
+		if strings.HasPrefix(target, "https://") {
+			scheme = "https"
+			target = strings.TrimPrefix(target, "https://")
+		} else {
+			scheme = "http"
+			target = strings.TrimPrefix(target, "http://")
+		}
+		
+		// 去掉路径部分
+		if idx := strings.Index(target, "/"); idx > 0 {
+			target = target[:idx]
+		}
+		
+		// 去掉查询参数
+		if idx := strings.Index(target, "?"); idx > 0 {
+			target = target[:idx]
+		}
+		
+		if target == "" {
+			return "", 0, "", fmt.Errorf("URL格式错误：缺少主机名")
+		}
+		
+		// 解析 host:port
+		if strings.Contains(target, ":") {
+			parts := strings.SplitN(target, ":", 2)
+			host = parts[0]
+			if host == "" {
+				return "", 0, "", fmt.Errorf("URL格式错误：主机名为空")
+			}
+			port, err = strconv.Atoi(parts[1])
+			if err != nil {
+				return "", 0, "", fmt.Errorf("端口格式错误：%s", parts[1])
+			}
+		} else {
+			host = target
+			if scheme == "https" {
+				port = 443
+			} else {
+				port = 80
+			}
+		}
+	} else if strings.Contains(target, ":") {
+		// IP:端口 或 域名:端口 格式
+		parts := strings.SplitN(target, ":", 2)
+		host = parts[0]
+		if host == "" {
+			return "", 0, "", fmt.Errorf("格式错误：主机名为空")
+		}
+		port, err = strconv.Atoi(parts[1])
+		if err != nil {
+			return "", 0, "", fmt.Errorf("端口格式错误：%s", parts[1])
+		}
+		// 根据端口推断协议
+		if port == 443 || port == 8443 {
+			scheme = "https"
+		} else {
+			scheme = "http"
+		}
+	} else {
+		// 只有 host（IP或域名），默认 80 端口
+		host = target
+		port = 80
+		scheme = "http"
+	}
+	
+	// 校验端口范围
+	if port <= 0 || port > 65535 {
+		return "", 0, "", fmt.Errorf("端口超出范围(1-65535)：%d", port)
+	}
+	
+	// 校验主机名格式（IP或域名）
+	if !isValidHost(host) {
+		return "", 0, "", fmt.Errorf("无效的主机名或IP：%s", host)
+	}
+
+	return host, port, scheme, nil
+}
+
+// isValidHost 校验主机名是否为有效的IP或域名
+func isValidHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	
+	// 检查是否为有效IP
+	if net.ParseIP(host) != nil {
+		return true
+	}
+	
+	// 检查是否为有效域名
+	// 域名规则：由字母、数字、连字符组成，点分隔，每段不超过63字符
+	if len(host) > 253 {
+		return false
+	}
+	
+	// 简单的域名格式校验
+	domainRegex := regexp.MustCompile(`^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)*[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?$`)
+	return domainRegex.MatchString(host)
 }

@@ -254,6 +254,52 @@ func (l *FingerprintUpdateEnabledLogic) UpdateEnabled(id string, enabled bool) (
 	return &types.BaseResp{Code: 0, Msg: "更新成功"}, nil
 }
 
+// FingerprintBatchUpdateEnabledLogic 批量更新指纹启用状态
+type FingerprintBatchUpdateEnabledLogic struct {
+	ctx    context.Context
+	svcCtx *svc.ServiceContext
+}
+
+func NewFingerprintBatchUpdateEnabledLogic(ctx context.Context, svcCtx *svc.ServiceContext) *FingerprintBatchUpdateEnabledLogic {
+	return &FingerprintBatchUpdateEnabledLogic{ctx: ctx, svcCtx: svcCtx}
+}
+
+func (l *FingerprintBatchUpdateEnabledLogic) BatchUpdateEnabled(ids []string, enabled bool, all bool) (*types.BaseResp, error) {
+	var filter bson.M
+	
+	if all {
+		// 操作全部自定义指纹
+		filter = bson.M{"is_builtin": false}
+	} else if len(ids) > 0 {
+		// 操作指定ID列表
+		oids := make([]primitive.ObjectID, 0, len(ids))
+		for _, id := range ids {
+			oid, err := primitive.ObjectIDFromHex(id)
+			if err != nil {
+				continue
+			}
+			oids = append(oids, oid)
+		}
+		if len(oids) == 0 {
+			return &types.BaseResp{Code: 400, Msg: "无有效的指纹ID"}, nil
+		}
+		filter = bson.M{"_id": bson.M{"$in": oids}}
+	} else {
+		return &types.BaseResp{Code: 400, Msg: "请指定要操作的指纹"}, nil
+	}
+
+	count, err := l.svcCtx.FingerprintModel.BatchUpdateEnabled(l.ctx, filter, enabled)
+	if err != nil {
+		return &types.BaseResp{Code: 500, Msg: "批量更新失败: " + err.Error()}, nil
+	}
+
+	action := "启用"
+	if !enabled {
+		action = "禁用"
+	}
+	return &types.BaseResp{Code: 0, Msg: fmt.Sprintf("已%s %d 条指纹", action, count)}, nil
+}
+
 
 // FingerprintImportLogic 导入指纹
 type FingerprintImportLogic struct {

@@ -23,3 +23,7 @@ export function clearAsset() {
 export function getAssetHistory(data) {
   return request.post('/asset/history', data)
 }
+
+export function importAsset(data) {
+  return request.post('/asset/import', data)
+}

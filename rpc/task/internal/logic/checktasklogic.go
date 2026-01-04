@@ -77,6 +77,7 @@ func (l *CheckTaskLogic) CheckTask(in *pb.CheckTaskReq) (*pb.CheckTaskResp, erro
 			IsExist:     true,
 			IsFinished:  false,
 			TaskId:      task.TaskId,
+			MainTaskId:  task.MainTaskId,
 			WorkspaceId: task.WorkspaceId,
 			Config:      task.Config,
 		}, nil

@@ -13,6 +13,7 @@
             <el-option label="中危" value="medium" />
             <el-option label="低危" value="low" />
             <el-option label="信息" value="info" />
+            <el-option label="未知" value="unknown" />
           </el-select>
         </el-form-item>
         <el-form-item label="来源">
@@ -26,6 +27,19 @@
           <el-button type="danger" :disabled="selectedRows.length === 0" @click="handleBatchDelete">
             批量删除 ({{ selectedRows.length }})
           </el-button>
+          <el-dropdown style="margin-left: 10px" @command="handleExport">
+            <el-button type="success">
+              导出<el-icon class="el-icon--right"><arrow-down /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="selected-target" :disabled="selectedRows.length === 0">导出选中目标 ({{ selectedRows.length }})</el-dropdown-item>
+                <el-dropdown-item command="selected-url" :disabled="selectedRows.length === 0">导出选中URL ({{ selectedRows.length }})</el-dropdown-item>
+                <el-dropdown-item divided command="all-target">导出全部目标</el-dropdown-item>
+                <el-dropdown-item command="all-url">导出全部URL</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </el-form-item>
       </el-form>
     </el-card>
@@ -136,6 +150,7 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown } from '@element-plus/icons-vue'
 import request from '@/api/request'
 import { useWorkspaceStore } from '@/stores/workspace'
 
@@ -206,12 +221,12 @@ function handleSelectionChange(rows) {
 }
 
 function getSeverityType(severity) {
-  const map = { critical: 'danger', high: 'danger', medium: 'warning', low: 'info', info: '' }
+  const map = { critical: 'danger', high: 'danger', medium: 'warning', low: 'info', info: '', unknown: 'info' }
   return map[severity] || ''
 }
 
 function getSeverityLabel(severity) {
-  const map = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息' }
+  const map = { critical: '严重', high: '高危', medium: '中危', low: '低危', info: '信息', unknown: '未知' }
   return map[severity] || severity
 }
 
@@ -252,6 +267,89 @@ async function handleBatchDelete() {
   } else {
     ElMessage.error(res.msg || '删除失败')
   }
+}
+
+// 导出功能
+async function handleExport(command) {
+  let data = []
+  let filename = ''
+  
+  if (command === 'selected-target' || command === 'selected-url') {
+    // 导出选中的
+    if (selectedRows.value.length === 0) {
+      ElMessage.warning('请先选择要导出的漏洞')
+      return
+    }
+    data = selectedRows.value
+    filename = command === 'selected-target' ? 'vul_targets_selected.txt' : 'vul_urls_selected.txt'
+  } else {
+    // 导出全部 - 需要获取所有数据
+    ElMessage.info('正在获取全部数据...')
+    try {
+      const res = await request.post('/vul/list', {
+        ...searchForm,
+        page: 1,
+        pageSize: 10000, // 获取全部
+        workspaceId: workspaceStore.currentWorkspaceId || ''
+      })
+      if (res.code === 0) {
+        data = res.list || []
+      } else {
+        ElMessage.error('获取数据失败')
+        return
+      }
+    } catch (e) {
+      ElMessage.error('获取数据失败: ' + e.message)
+      return
+    }
+    filename = command === 'all-target' ? 'vul_targets_all.txt' : 'vul_urls_all.txt'
+  }
+  
+  if (data.length === 0) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+  
+  // 根据类型提取数据并去重
+  let exportData = []
+  const seen = new Set()
+  
+  if (command.includes('target')) {
+    // 导出目标 (authority)
+    for (const row of data) {
+      if (row.authority && !seen.has(row.authority)) {
+        seen.add(row.authority)
+        exportData.push(row.authority)
+      }
+    }
+  } else {
+    // 导出URL
+    for (const row of data) {
+      if (row.url && !seen.has(row.url)) {
+        seen.add(row.url)
+        exportData.push(row.url)
+      }
+    }
+  }
+  
+  if (exportData.length === 0) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+  
+  // 生成文件并下载
+  const content = exportData.join('\n')
+  const blob = new Blob([content], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  
+  ElMessage.success(`成功导出 ${exportData.length} 条数据`)
 }
 </script>
 

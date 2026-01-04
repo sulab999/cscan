@@ -13,7 +13,12 @@ export function validateSingleTarget(target) {
     return null // 空行或注释行
   }
 
-  // 去除可能的端口部分
+  // 检查是否是 IPv6 格式（包含多个冒号）
+  if (isIPv6Format(target)) {
+    return validateIPv6Target(target)
+  }
+
+  // 去除可能的端口部分（仅针对IPv4和域名）
   let host = target
   const lastColon = target.lastIndexOf(':')
   if (lastColon !== -1) {
@@ -32,14 +37,14 @@ export function validateSingleTarget(target) {
   // IP 范围格式
   if (host.includes('-')) {
     const parts = host.split('-')
-    if (parts.length === 2 && isValidIP(parts[0].trim())) {
+    if (parts.length === 2 && isValidIPv4(parts[0].trim())) {
       return validateIPRange(host)
     }
     // 可能是域名中包含连字符
   }
 
   // 单个 IP
-  if (isValidIP(host)) {
+  if (isValidIPv4(host)) {
     return null
   }
 
@@ -112,10 +117,10 @@ function validateIPRange(ipRange) {
   const startIP = parts[0].trim()
   const endIP = parts[1].trim()
 
-  if (!isValidIP(startIP)) {
+  if (!isValidIPv4(startIP)) {
     return `起始IP '${startIP}' 无效`
   }
-  if (!isValidIP(endIP)) {
+  if (!isValidIPv4(endIP)) {
     return `结束IP '${endIP}' 无效`
   }
 
@@ -136,9 +141,136 @@ function validateIPRange(ipRange) {
 }
 
 /**
+ * 检查是否是 IPv6 格式（包含多个冒号、以 [ 开头、或包含 Zone ID）
+ */
+function isIPv6Format(target) {
+  // IPv6 地址包含多个冒号，或者是 [IPv6]:port 格式
+  if (target.startsWith('[')) {
+    return true
+  }
+  // 包含 Zone ID 的 IPv6（如 fe80::1%eth0）
+  if (target.includes('%')) {
+    return true
+  }
+  // 统计冒号数量，IPv6 至少有2个冒号
+  const colonCount = (target.match(/:/g) || []).length
+  return colonCount >= 2
+}
+
+/**
+ * 校验 IPv6 目标
+ */
+function validateIPv6Target(target) {
+  let ipv6 = target
+  
+  // 处理 [IPv6]:port 格式
+  if (target.startsWith('[')) {
+    const closeBracket = target.indexOf(']')
+    if (closeBracket === -1) {
+      return '无效的IPv6格式，缺少闭合括号 ]'
+    }
+    ipv6 = target.substring(1, closeBracket)
+    // 检查端口部分
+    const remaining = target.substring(closeBracket + 1)
+    if (remaining && !remaining.startsWith(':')) {
+      return '无效的IPv6格式'
+    }
+    if (remaining.startsWith(':')) {
+      const portStr = remaining.substring(1)
+      const port = parseInt(portStr, 10)
+      if (isNaN(port) || port <= 0 || port > 65535) {
+        return `无效的端口号: ${portStr}`
+      }
+    }
+  }
+
+  // 去除 zone ID（如 %eth0 或 %5）
+  const zoneIndex = ipv6.indexOf('%')
+  if (zoneIndex !== -1) {
+    ipv6 = ipv6.substring(0, zoneIndex)
+  }
+
+  // 处理 IPv6 CIDR
+  if (ipv6.includes('/')) {
+    const parts = ipv6.split('/')
+    if (parts.length !== 2) {
+      return '无效的IPv6 CIDR格式'
+    }
+    const mask = parseInt(parts[1], 10)
+    if (isNaN(mask) || mask < 0 || mask > 128) {
+      return `无效的IPv6子网掩码: ${parts[1]}`
+    }
+    ipv6 = parts[0]
+  }
+
+  if (isValidIPv6(ipv6)) {
+    return null
+  }
+
+  return '无效的IPv6地址格式'
+}
+
+/**
+ * 检查是否是有效的 IPv6 地址
+ */
+function isValidIPv6(ip) {
+  // 简化的 IPv6 验证
+  // IPv6 格式: 8组4位十六进制数，用冒号分隔
+  // 支持 :: 缩写形式
+  
+  if (!ip || ip.length > 45) {
+    return false
+  }
+
+  // 检查是否包含非法字符
+  if (!/^[0-9a-fA-F:]+$/.test(ip)) {
+    return false
+  }
+
+  // 处理 :: 缩写
+  const doubleColonCount = (ip.match(/::/g) || []).length
+  if (doubleColonCount > 1) {
+    return false // 只能有一个 ::
+  }
+
+  if (doubleColonCount === 1) {
+    // 有 :: 缩写的情况
+    const parts = ip.split('::')
+    const left = parts[0] ? parts[0].split(':') : []
+    const right = parts[1] ? parts[1].split(':') : []
+    
+    // 总组数不能超过8
+    if (left.length + right.length > 7) {
+      return false
+    }
+
+    // 验证每个组
+    for (const group of [...left, ...right]) {
+      if (group && (group.length > 4 || !/^[0-9a-fA-F]*$/.test(group))) {
+        return false
+      }
+    }
+  } else {
+    // 没有 :: 缩写，必须是完整的8组
+    const groups = ip.split(':')
+    if (groups.length !== 8) {
+      return false
+    }
+
+    for (const group of groups) {
+      if (!group || group.length > 4 || !/^[0-9a-fA-F]+$/.test(group)) {
+        return false
+      }
+    }
+  }
+
+  return true
+}
+
+/**
  * 检查是否是有效的 IPv4 地址
  */
-function isValidIP(ip) {
+function isValidIPv4(ip) {
   const parts = ip.split('.')
   if (parts.length !== 4) return false
   

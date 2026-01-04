@@ -98,9 +98,21 @@ func (l *MainTaskListLogic) MainTaskList(req *types.MainTaskListReq, workspaceId
 		progress := t.Progress
 		currentPhase := t.CurrentPhase
 		subTaskDone := t.SubTaskDone
+		status := t.Status
+		
+		// 如果状态为空，根据进度推断状态（兼容旧数据）
+		if status == "" {
+			if progress >= 100 || (t.SubTaskCount > 0 && subTaskDone >= t.SubTaskCount) {
+				status = "SUCCESS"
+			} else if progress > 0 || subTaskDone > 0 {
+				status = "STARTED"
+			} else {
+				status = "CREATED"
+			}
+		}
 		
 		// 如果任务正在执行中，尝试从Redis获取实时进度和当前阶段
-		if t.Status == "STARTED" && l.svcCtx.RedisClient != nil {
+		if status == "STARTED" && l.svcCtx.RedisClient != nil {
 			// 获取主任务的当前阶段
 			mainKey := fmt.Sprintf("cscan:task:progress:%s", t.TaskId)
 			if data, err := l.svcCtx.RedisClient.Get(l.ctx, mainKey).Result(); err == nil && data != "" {
@@ -114,66 +126,18 @@ func (l *MainTaskListLogic) MainTaskList(req *types.MainTaskListReq, workspaceId
 				}
 			}
 
-			// 计算整体进度
+			// 基于子任务完成数计算进度
 			subTaskCount := t.SubTaskCount
 			if subTaskCount <= 0 {
 				subTaskCount = 1 // 兼容旧任务
 			}
 
-			if subTaskCount > 1 {
-				// 多子任务：遍历所有子任务，统计已完成数和运行中进度
-				completedCount := 0
-				runningProgress := 0
-				runningCount := 0
-
-				// 获取所有子任务的进度
-				for i := 0; i < subTaskCount; i++ {
-					subTaskId := fmt.Sprintf("%s-%d", t.TaskId, i)
-					subKey := fmt.Sprintf("cscan:task:progress:sub:%s", subTaskId)
-					if data, err := l.svcCtx.RedisClient.Get(l.ctx, subKey).Result(); err == nil && data != "" {
-						var subProgress struct {
-							Progress int `json:"progress"`
-						}
-						if json.Unmarshal([]byte(data), &subProgress) == nil {
-							if subProgress.Progress >= 100 {
-								// 已完成的子任务
-								completedCount++
-							} else if subProgress.Progress > 0 {
-								// 运行中的子任务
-								runningProgress += subProgress.Progress
-								runningCount++
-							}
-						}
-					}
-				}
-
-				// 使用实时统计的已完成数（取较大值，避免数据不一致）
-				if completedCount > subTaskDone {
-					subTaskDone = completedCount
-				}
-
-				// 计算整体进度
-				completedProgress := subTaskDone * 100
-				totalProgress := completedProgress
-				if runningCount > 0 {
-					totalProgress += runningProgress / runningCount // 取运行中子任务的平均进度
-				}
-				progress = totalProgress / subTaskCount
+			// 进度 = 已完成子任务数 / 总子任务数 * 100
+			if subTaskCount > 0 {
+				progress = subTaskDone * 100 / subTaskCount
+				// 未全部完成时最多显示99%
 				if progress > 99 && subTaskDone < subTaskCount {
-					progress = 99 // 未全部完成时最多显示99%
-				}
-			} else {
-				// 单任务或单批次：直接获取进度
-				subKey := fmt.Sprintf("cscan:task:progress:sub:%s", t.TaskId)
-				if data, err := l.svcCtx.RedisClient.Get(l.ctx, subKey).Result(); err == nil && data != "" {
-					var progressData struct {
-						Progress int `json:"progress"`
-					}
-					if json.Unmarshal([]byte(data), &progressData) == nil {
-						if progressData.Progress > progress {
-							progress = progressData.Progress
-						}
-					}
+					progress = 99
 				}
 			}
 		}
@@ -196,7 +160,7 @@ func (l *MainTaskListLogic) MainTaskList(req *types.MainTaskListReq, workspaceId
 			Config:       t.Config,
 			ProfileId:    t.ProfileId,
 			ProfileName:  t.ProfileName,
-			Status:       t.Status,
+			Status:       status,
 			CurrentPhase: currentPhase,
 			Progress:     progress,
 			Result:       t.Result,
@@ -575,30 +539,65 @@ func (l *MainTaskRetryLogic) MainTaskRetry(req *types.MainTaskRetryReq, workspac
 	}
 
 	// 从配置中获取批次大小，默认50
+	// batchSize = 0 表示不拆分，使用一个很大的值
 	batchSize := 50
-	if bs, ok := taskConfig["batchSize"].(float64); ok && bs > 0 {
-		batchSize = int(bs)
+	if bs, ok := taskConfig["batchSize"].(float64); ok {
+		if bs == 0 {
+			batchSize = 1000000 // 不拆分，使用一个很大的值
+		} else if bs > 0 {
+			batchSize = int(bs)
+		}
 	}
 
 	// 使用目标拆分器判断是否需要拆分
 	splitter := scheduler.NewTargetSplitter(batchSize)
 	batches := splitter.SplitTargets(oldTask.Target)
 
-	l.Logger.Infof("Retry task %s target split into %d batches (batchSize=%d)", newTaskId, len(batches), batchSize)
+	// 解析任务配置，计算启用的扫描模块数量
+	config, _ := scheduler.ParseTaskConfig(string(configBytes))
+	enabledModules := 0
+	if config != nil {
+		if config.DomainScan != nil && config.DomainScan.Enable {
+			enabledModules++
+		}
+		if config.PortScan == nil || config.PortScan.Enable { // 端口扫描默认启用
+			enabledModules++
+		}
+		if config.PortIdentify != nil && config.PortIdentify.Enable {
+			enabledModules++
+		}
+		if config.Fingerprint != nil && config.Fingerprint.Enable {
+			enabledModules++
+		}
+		if config.PocScan != nil && config.PocScan.Enable {
+			enabledModules++
+		}
+	}
+	if enabledModules == 0 {
+		enabledModules = 1 // 至少有一个模块
+	}
+
+	// 子任务总数 = 目标批次数 × 启用的扫描模块数
+	subTaskCount := len(batches) * enabledModules
+
+	l.Logger.Infof("Retry task %s target split into %d batches (batchSize=%d), enabledModules=%d, subTaskCount=%d", 
+		newTaskId, len(batches), batchSize, enabledModules, subTaskCount)
 
 	// 更新新任务状态为PENDING，记录子任务数量
 	taskModel.Update(l.ctx, newTask.Id.Hex(), bson.M{
 		"status":         model.TaskStatusPending,
-		"sub_task_count": len(batches),
+		"sub_task_count": subTaskCount,
 		"sub_task_done":  0,
 	})
 
 	// 保存主任务信息到 Redis
 	taskInfoKey := "cscan:task:info:" + newTaskId
 	taskInfoData, _ := json.Marshal(map[string]interface{}{
-		"workspaceId":  workspaceId,
-		"mainTaskId":   newTask.Id.Hex(),
-		"subTaskCount": len(batches),
+		"workspaceId":    workspaceId,
+		"mainTaskId":     newTask.Id.Hex(),
+		"subTaskCount":   subTaskCount,
+		"batchCount":     len(batches),
+		"enabledModules": enabledModules,
 	})
 	l.svcCtx.RedisClient.Set(l.ctx, taskInfoKey, taskInfoData, 24*time.Hour)
 
@@ -653,7 +652,7 @@ func (l *MainTaskRetryLogic) MainTaskRetry(req *types.MainTaskRetryReq, workspac
 			subTaskInfoData, _ := json.Marshal(map[string]interface{}{
 				"workspaceId":  workspaceId,
 				"mainTaskId":   newTask.Id.Hex(),
-				"subTaskCount": len(batches),
+				"subTaskCount": subTaskCount,
 			})
 			l.svcCtx.RedisClient.Set(l.ctx, subTaskInfoKey, subTaskInfoData, 24*time.Hour)
 		}
@@ -707,21 +706,54 @@ func (l *MainTaskStartLogic) MainTaskStart(req *types.MainTaskControlReq, worksp
 	}
 
 	// 从配置中获取批次大小，默认50
+	// batchSize = 0 表示不拆分，使用一个很大的值
 	batchSize := 50
-	if bs, ok := taskConfig["batchSize"].(float64); ok && bs > 0 {
-		batchSize = int(bs)
+	if bs, ok := taskConfig["batchSize"].(float64); ok {
+		if bs == 0 {
+			batchSize = 1000000 // 不拆分，使用一个很大的值
+		} else if bs > 0 {
+			batchSize = int(bs)
+		}
 	}
 
 	// 使用目标拆分器判断是否需要拆分
 	splitter := scheduler.NewTargetSplitter(batchSize)
 	batches := splitter.SplitTargets(target)
 
-	l.Logger.Infof("Task %s target split into %d batches (batchSize=%d)", task.TaskId, len(batches), batchSize)
+	// 解析任务配置，计算启用的扫描模块数量
+	config, _ := scheduler.ParseTaskConfig(task.Config)
+	enabledModules := 0
+	if config != nil {
+		if config.DomainScan != nil && config.DomainScan.Enable {
+			enabledModules++
+		}
+		if config.PortScan == nil || config.PortScan.Enable { // 端口扫描默认启用
+			enabledModules++
+		}
+		if config.PortIdentify != nil && config.PortIdentify.Enable {
+			enabledModules++
+		}
+		if config.Fingerprint != nil && config.Fingerprint.Enable {
+			enabledModules++
+		}
+		if config.PocScan != nil && config.PocScan.Enable {
+			enabledModules++
+		}
+	}
+	if enabledModules == 0 {
+		enabledModules = 1 // 至少有一个模块
+	}
+
+	// 子任务总数 = 目标批次数 × 启用的扫描模块数
+	subTaskCount := len(batches) * enabledModules
+
+	l.Logger.Infof("Task %s target split into %d batches (batchSize=%d), enabledModules=%d, subTaskCount=%d", 
+		task.TaskId, len(batches), batchSize, enabledModules, subTaskCount)
 
 	// 更新主任务状态为PENDING，记录子任务数量
 	update := bson.M{
-		"status":      model.TaskStatusPending,
-		"sub_task_count": len(batches),
+		"status":         model.TaskStatusPending,
+		"sub_task_count": subTaskCount,
 		"sub_task_done":  0,
 	}
 	if err := taskModel.Update(l.ctx, req.Id, update); err != nil {
@@ -731,9 +763,11 @@ func (l *MainTaskStartLogic) MainTaskStart(req *types.MainTaskControlReq, worksp
 	// 保存主任务信息到 Redis
 	taskInfoKey := "cscan:task:info:" + task.TaskId
 	taskInfoData, _ := json.Marshal(map[string]interface{}{
-		"workspaceId":   workspaceId,
-		"mainTaskId":    task.Id.Hex(),
-		"subTaskCount":  len(batches),
+		"workspaceId":    workspaceId,
+		"mainTaskId":     task.Id.Hex(),
+		"subTaskCount":   subTaskCount,
+		"batchCount":     len(batches),
+		"enabledModules": enabledModules,
 	})
 	l.svcCtx.RedisClient.Set(l.ctx, taskInfoKey, taskInfoData, 24*time.Hour)
 
@@ -785,10 +819,11 @@ func (l *MainTaskStartLogic) MainTaskStart(req *types.MainTaskControlReq, worksp
 		// 只有多批次时才保存子任务信息到 Redis（单批次时使用主任务信息）
 		if len(batches) > 1 {
 			subTaskInfoKey := "cscan:task:info:" + subTaskId
-			subTaskInfoData, _ := json.Marshal(map[string]string{
-				"workspaceId": workspaceId,
-				"mainTaskId":  task.Id.Hex(),
+			subTaskInfoData, _ := json.Marshal(map[string]interface{}{
+				"workspaceId":  workspaceId,
+				"mainTaskId":   task.Id.Hex(),
 				"parentTaskId": task.TaskId,
+				"subTaskCount": subTaskCount,
 			})
 			l.svcCtx.RedisClient.Set(l.ctx, subTaskInfoKey, subTaskInfoData, 24*time.Hour)
 		}

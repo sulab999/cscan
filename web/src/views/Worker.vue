@@ -4,6 +4,9 @@
       <el-button type="primary" @click="loadData" :loading="loading">
         <el-icon><Refresh /></el-icon>刷新状态
       </el-button>
+      <el-button type="success" @click="openInstallDialog">
+        <el-icon><Download /></el-icon>安装Worker
+      </el-button>
       <span v-if="loading" style="margin-left: 10px; color: #909399; font-size: 12px;">正在查询Worker实时状态...</span>
       <el-switch 
         v-model="autoRefresh" 
@@ -79,8 +82,9 @@
           </template>
         </el-table-column>
         <el-table-column prop="updateTime" label="最后响应" width="160" />
-        <el-table-column label="操作" width="200" fixed="right">
+        <el-table-column label="操作" width="280" fixed="right">
           <template #default="{ row }">
+            <el-button size="small" type="primary" :icon="Monitor" @click="openConsole(row.name)" :disabled="row.status !== 'running'">控制台</el-button>
             <el-popconfirm
               title="确定要重启该Worker吗？"
               confirm-button-text="确定"
@@ -148,6 +152,91 @@
       </template>
     </el-dialog>
 
+    <!-- Worker安装对话框 -->
+    <el-dialog v-model="installDialogVisible" title="安装Worker探针" width="700px">
+      <div class="install-dialog">
+        <el-alert type="info" :closable="false" style="margin-bottom: 20px">
+          <template #title>
+            在目标机器上执行以下命令，即可自动下载并启动Worker探针连接到本服务端
+          </template>
+        </el-alert>
+
+        <el-form label-width="100px" v-if="installInfo.installKey">
+          <el-form-item label="安装密钥">
+            <div class="key-display">
+              <code>{{ installInfo.installKey }}</code>
+              <el-button size="small" @click="copyToClipboard(installInfo.installKey)">复制</el-button>
+              <el-button size="small" type="warning" @click="refreshInstallKey" :loading="refreshKeyLoading">刷新密钥</el-button>
+            </div>
+          </el-form-item>
+
+          <el-form-item label="服务地址">
+            <el-input v-model="installInfo.serverAddr" placeholder="API服务地址 (如 http://server:8888)" style="width: 300px" />
+          </el-form-item>
+        </el-form>
+
+        <el-divider content-position="left">选择操作系统</el-divider>
+
+        <el-tabs v-model="activeOsTab" type="border-card">
+          <el-tab-pane label="Linux" name="linux">
+            <div class="command-section">
+              <p class="command-title">一键安装（前台运行）：</p>
+              <div class="command-box">
+                <code>{{ installInfo.commands?.linux || '加载中...' }}</code>
+                <el-button size="small" @click="copyToClipboard(installInfo.commands?.linux)">复制</el-button>
+              </div>
+              <p class="command-title" style="margin-top: 15px">后台运行：</p>
+              <div class="command-box">
+                <code>{{ installInfo.commands?.linux_daemon || '加载中...' }}</code>
+                <el-button size="small" @click="copyToClipboard(installInfo.commands?.linux_daemon)">复制</el-button>
+              </div>
+            </div>
+          </el-tab-pane>
+
+          <el-tab-pane label="Windows" name="windows">
+            <div class="command-section">
+              <p class="command-title">PowerShell安装：</p>
+              <div class="command-box">
+                <code>{{ installInfo.commands?.windows || '加载中...' }}</code>
+                <el-button size="small" @click="copyToClipboard(installInfo.commands?.windows)">复制</el-button>
+              </div>
+              <p class="command-title" style="margin-top: 15px">CMD安装（certutil）：</p>
+              <div class="command-box">
+                <code>{{ installInfo.commands?.windows_cmd || '加载中...' }}</code>
+                <el-button size="small" @click="copyToClipboard(installInfo.commands?.windows_cmd)">复制</el-button>
+              </div>
+            </div>
+          </el-tab-pane>
+
+          <!-- <el-tab-pane label="macOS" name="darwin">
+            <div class="command-section">
+              <p class="command-title">一键安装：</p>
+              <div class="command-box">
+                <code>{{ installInfo.commands?.darwin || '加载中...' }}</code>
+                <el-button size="small" @click="copyToClipboard(installInfo.commands?.darwin)">复制</el-button>
+              </div>
+            </div>
+          </el-tab-pane> -->
+        </el-tabs>
+
+        <el-divider />
+
+        <el-collapse>
+          <el-collapse-item title="命令行参数说明" name="params">
+            <el-table :data="paramTableData" size="small" border>
+              <el-table-column prop="param" label="参数" width="80" />
+              <el-table-column prop="desc" label="说明" />
+              <el-table-column prop="default" label="默认值" width="120" />
+            </el-table>
+          </el-collapse-item>
+        </el-collapse>
+      </div>
+
+      <template #footer>
+        <el-button @click="installDialogVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
     <!-- 实时日志 -->
     <el-card>
       <template #header>
@@ -211,7 +300,7 @@
           <span class="log-message">{{ log.message }}</span>
         </div>
         <div v-if="filteredLogs.length === 0 && logs.length > 0" class="log-empty">没有匹配的日志</div>
-        <div v-if="logs.length === 0" class="log-empty">暂无日志，请确保Worker启动时指定了Redis地址参数 -r</div>
+        <div v-if="logs.length === 0" class="log-empty">暂无日志，Worker 通过 WebSocket 推送日志到服务端</div>
       </div>
     </el-card>
   </div>
@@ -219,10 +308,12 @@
 
 <script setup>
 import { ref, onMounted, onUnmounted, nextTick, watch, reactive, computed } from 'vue'
-import { Refresh, Delete, Edit, RefreshRight, Search } from '@element-plus/icons-vue'
+import { Refresh, Delete, Edit, RefreshRight, Search, Download, Monitor } from '@element-plus/icons-vue'
 import { ElMessage } from 'element-plus'
+import { useRouter } from 'vue-router'
 import request from '@/api/request'
 
+const router = useRouter()
 const loading = ref(false)
 const tableData = ref([])
 const logs = ref([])
@@ -236,6 +327,24 @@ const searchKeyword = ref('')
 let pollingTimer = null
 let workerRefreshTimer = null
 let logIdSet = new Set() // 用于去重
+
+// Worker安装相关
+const installDialogVisible = ref(false)
+const activeOsTab = ref('linux')
+const refreshKeyLoading = ref(false)
+const installInfo = reactive({
+  installKey: '',
+  serverAddr: '',
+  commands: {}
+})
+
+// 参数说明表格数据
+const paramTableData = [
+  { param: '-k', desc: '安装密钥（必需）', default: '无' },
+  { param: '-s', desc: 'API服务地址', default: 'http://localhost:8888' },
+  { param: '-n', desc: 'Worker名称', default: '自动生成' },
+  { param: '-c', desc: '并发数', default: '5' }
+]
 
 // 筛选后的日志
 const filteredLogs = computed(() => {
@@ -388,7 +497,7 @@ function toggleConnection() {
 
 async function clearLogs() {
   try {
-    // 清空服务端Redis中的历史日志
+    // 清空服务端历史日志
     const res = await request.post('/worker/logs/clear')
     if (res.code === 0) {
       // 清空本地日志
@@ -529,6 +638,71 @@ async function searchLogs() {
   // 前端已通过 computed 实现实时过滤，此函数可用于触发服务端搜索
   // 当前实现：前端过滤，无需额外操作
 }
+
+// Worker安装相关方法
+async function openInstallDialog() {
+  installDialogVisible.value = true
+  await loadInstallCommand()
+}
+
+async function loadInstallCommand() {
+  try {
+    const res = await request.post('/worker/install/command', {
+      serverAddr: installInfo.serverAddr || ''
+    })
+    if (res.code === 0) {
+      installInfo.installKey = res.installKey
+      installInfo.serverAddr = res.serverAddr
+      installInfo.commands = res.commands || {}
+    } else {
+      ElMessage.error(res.msg || '获取安装命令失败')
+    }
+  } catch (e) {
+    ElMessage.error('获取安装命令失败: ' + e.message)
+  }
+}
+
+async function refreshInstallKey() {
+  refreshKeyLoading.value = true
+  try {
+    const res = await request.post('/worker/install/refresh')
+    if (res.code === 0) {
+      installInfo.installKey = res.installKey
+      ElMessage.success('安装密钥已刷新')
+      // 重新加载安装命令
+      await loadInstallCommand()
+    } else {
+      ElMessage.error(res.msg || '刷新失败')
+    }
+  } catch (e) {
+    ElMessage.error('刷新失败: ' + e.message)
+  } finally {
+    refreshKeyLoading.value = false
+  }
+}
+
+function copyToClipboard(text) {
+  if (!text) {
+    ElMessage.warning('内容为空')
+    return
+  }
+  navigator.clipboard.writeText(text).then(() => {
+    ElMessage.success('已复制到剪贴板')
+  }).catch(() => {
+    // 降级方案
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    ElMessage.success('已复制到剪贴板')
+  })
+}
+
+function openConsole(workerName) {
+  router.push(`/worker/console/${workerName}`)
+}
 </script>
 
 <style lang="scss" scoped>
@@ -617,6 +791,56 @@ async function searchLogs() {
       opacity: 0;
       font-size: 14px;
       transition: opacity 0.2s;
+    }
+  }
+}
+
+// Worker安装对话框样式
+.install-dialog {
+  .key-display {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    
+    code {
+      background: #f5f7fa;
+      padding: 8px 12px;
+      border-radius: 4px;
+      font-family: 'Consolas', 'Monaco', monospace;
+      font-size: 14px;
+      color: #e6a23c;
+      font-weight: bold;
+    }
+  }
+
+  .command-section {
+    .command-title {
+      margin: 0 0 8px 0;
+      font-size: 13px;
+      color: #606266;
+    }
+
+    .command-box {
+      display: flex;
+      align-items: flex-start;
+      gap: 10px;
+      background: #1e1e1e;
+      padding: 12px;
+      border-radius: 4px;
+      
+      code {
+        flex: 1;
+        font-family: 'Consolas', 'Monaco', monospace;
+        font-size: 12px;
+        color: #d4d4d4;
+        word-break: break-all;
+        white-space: pre-wrap;
+        line-height: 1.6;
+      }
+      
+      .el-button {
+        flex-shrink: 0;
+      }
     }
   }
 }

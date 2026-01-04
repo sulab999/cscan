@@ -93,6 +93,12 @@ const routes = [
         meta: { title: 'Worker管理', icon: 'Connection' }
       },
       {
+        path: 'worker/console/:name',
+        name: 'WorkerConsole',
+        component: () => import('@/views/WorkerConsole.vue'),
+        meta: { title: 'Worker控制台', icon: 'Monitor', hidden: true }
+      },
+      {
         path: 'poc',
         name: 'Poc',
         component: () => import('@/views/Poc.vue'),

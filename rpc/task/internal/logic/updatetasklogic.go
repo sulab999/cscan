@@ -3,7 +3,6 @@ package logic
 import (
 	"context"
 	"encoding/json"
-	"strings"
 	"time"
 
 	"cscan/rpc/task/internal/svc"
@@ -105,68 +104,36 @@ func (l *UpdateTaskLogic) updateTaskInDB(taskId, state, result string) {
 		"status": state,
 	}
 
-	// 判断是否是子任务：
-	// 子任务ID格式: {parentTaskId}-{index}，其中 parentTaskId 是 UUID
-	// 单任务ID格式: {taskId}，就是 UUID 本身
-	// 判断方法：检查 taskId 最后一个 "-" 后面是否是纯数字
-	isSubTask := false
-	if subTaskCount > 1 {
-		lastDash := strings.LastIndex(taskId, "-")
-		if lastDash > 0 && lastDash < len(taskId)-1 {
-			suffix := taskId[lastDash+1:]
-			// 检查后缀是否全是数字
-			isNumber := true
-			for _, c := range suffix {
-				if c < '0' || c > '9' {
-					isNumber = false
-					break
-				}
-			}
-			isSubTask = isNumber
-		}
-	}
-
-	l.Logger.Infof("UpdateTask: taskId=%s, mainTaskId=%s, subTaskCount=%d, isSubTask=%v", taskId, mainTaskId, subTaskCount, isSubTask)
+	l.Logger.Infof("UpdateTask: taskId=%s, mainTaskId=%s, subTaskCount=%d", taskId, mainTaskId, subTaskCount)
 
 	// 根据状态设置不同字段
 	switch state {
 	case "STARTED":
-		// 任务开始时设置开始时间
-		update["start_time"] = now
-		update["progress"] = 10 // 开始时进度设为10%
-	case "SUCCESS", "COMPLETED":
-		if isSubTask {
-			// 子任务完成，递增 sub_task_done
-			// 使用 $inc 操作符，mainTaskId 是 MongoDB ObjectID
-			if err := taskModel.IncrSubTaskDone(l.ctx, mainTaskId); err != nil {
-				l.Logger.Errorf("UpdateTask: failed to incr sub_task_done, mainTaskId=%s, error=%v", mainTaskId, err)
-			} else {
-				l.Logger.Infof("UpdateTask: sub_task_done incremented, mainTaskId=%s, taskId=%s", mainTaskId, taskId)
-			}
-			// 检查是否所有子任务都完成了
-			// 使用 FindById 而不是 FindByTaskId，因为 mainTaskId 是 MongoDB ObjectID
-			task, err := taskModel.FindById(l.ctx, mainTaskId)
-			if err == nil && task != nil && task.SubTaskDone+1 >= task.SubTaskCount {
-				// 所有子任务完成，更新主任务状态
-				update["end_time"] = now
-				update["progress"] = 100
-				update["result"] = result
-				l.Logger.Infof("UpdateTask: all sub-tasks completed, mainTaskId=%s, done=%d, total=%d", mainTaskId, task.SubTaskDone+1, task.SubTaskCount)
-			} else {
-				// 还有子任务未完成，只更新 sub_task_done，不更新主任务状态
-				if err != nil {
-					l.Logger.Errorf("UpdateTask: failed to find task by id, mainTaskId=%s, error=%v", mainTaskId, err)
-				} else if task != nil {
-					l.Logger.Infof("UpdateTask: sub-task completed, mainTaskId=%s, done=%d, total=%d", mainTaskId, task.SubTaskDone+1, task.SubTaskCount)
-				}
-				return
-			}
+		// 任务开始时设置开始时间和状态
+		// 检查主任务当前状态，如果已经是STARTED则不重复设置
+		task, err := taskModel.FindById(l.ctx, mainTaskId)
+		if err != nil {
+			l.Logger.Errorf("UpdateTask: failed to find task, mainTaskId=%s, error=%v", mainTaskId, err)
+			// 查询失败时仍然尝试更新状态和开始时间
+			update["start_time"] = now
+		} else if task.Status == "STARTED" {
+			// 主任务已经是STARTED状态，不需要再更新状态
+			delete(update, "status")
+			// 但仍然更新 update_time（在 taskModel.Update 中自动添加）
 		} else {
-			// 单任务或最后一个子任务完成
-			update["end_time"] = now
-			update["progress"] = 100
-			update["result"] = result
+			// 主任务不是STARTED状态（如PENDING），更新状态和开始时间
+			update["start_time"] = now
 		}
+	case "SUCCESS", "COMPLETED":
+		// 如果有多个子任务（subTaskCount > 1），不在这里更新主任务状态
+		// 主任务的完成状态由 IncrSubTaskDone 在所有子任务完成后设置
+		if subTaskCount > 1 {
+			l.Logger.Infof("UpdateTask: task %s has %d sub-tasks, skipping status update (managed by IncrSubTaskDone)", taskId, subTaskCount)
+			return
+		}
+		// 单任务（subTaskCount <= 1）完成时设置结束时间
+		update["end_time"] = now
+		update["result"] = result
 	case "FAILURE":
 		// 任务失败时设置结束时间
 		update["end_time"] = now

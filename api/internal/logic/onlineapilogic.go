@@ -75,7 +75,12 @@ func (l *OnlineAPILogic) Search(req *types.OnlineSearchReq, workspaceId string) 
 		}
 	case "hunter":
 		client := onlineapi.NewHunterClient(config.Key)
-		result, err := client.Search(l.ctx, req.Query, req.Page, req.PageSize, "", "")
+		// Hunter API page_size 最大为100
+		hunterPageSize := req.PageSize
+		if hunterPageSize > 100 {
+			hunterPageSize = 100
+		}
+		result, err := client.Search(l.ctx, req.Query, req.Page, hunterPageSize, "", "")
 		if err != nil {
 			return &types.OnlineSearchResp{Code: 500, Msg: "查询失败: " + err.Error()}, nil
 		}
@@ -98,8 +103,12 @@ func (l *OnlineAPILogic) Search(req *types.OnlineSearchReq, workspaceId string) 
 		if err != nil {
 			return &types.OnlineSearchResp{Code: 500, Msg: "查询失败: " + err.Error()}, nil
 		}
+		// 检查是否配额用尽
+		if result.Data.IsExhausted {
+			return &types.OnlineSearchResp{Code: 403, Msg: "Quake API 配额已用尽，无法获取更多数据"}, nil
+		}
 		total = result.Meta.Pagination.Total
-		for _, a := range result.Data {
+		for _, a := range result.Data.Items {
 			results = append(results, types.OnlineSearchResult{
 				Host: a.Service.HTTP.Host, IP: a.IP, Port: a.Port, Protocol: a.Service.Name,
 				Title: a.Service.HTTP.Title, Server: a.Service.HTTP.Server,
@@ -151,18 +160,30 @@ func (l *OnlineAPILogic) ImportAll(req *types.OnlineImportAllReq, workspaceId st
 	if pageSize <= 0 {
 		pageSize = 100
 	}
-	maxPages := req.MaxPages
-	if maxPages <= 0 {
-		maxPages = 10
+	
+	// Hunter 和 Quake 单次最大 100
+	if req.Platform == "hunter" || req.Platform == "quake" {
+		if pageSize > 100 {
+			pageSize = 100
+		}
 	}
+	
+	// maxPages <= 0 表示不限制页数
+	maxPages := req.MaxPages
+	hasMaxPages := maxPages > 0
 
 	totalFetched := 0
 	totalImport := 0
 	currentPage := 1
 
-	for currentPage <= maxPages {
+PageLoop:
+	for {
+		// 如果设置了最大页数限制，检查是否超过
+		if hasMaxPages && currentPage > maxPages {
+			break
+		}
+		
 		var results []types.OnlineSearchResult
-		var total int
 
 		switch req.Platform {
 		case "fofa":
@@ -172,9 +193,8 @@ func (l *OnlineAPILogic) ImportAll(req *types.OnlineImportAllReq, workspaceId st
 				if currentPage == 1 {
 					return &types.OnlineImportAllResp{Code: 500, Msg: "查询失败: " + err.Error()}, nil
 				}
-				break
+				break PageLoop
 			}
-			total = result.Size
 			assets := client.ParseResults(result)
 			for _, a := range assets {
 				results = append(results, types.OnlineSearchResult{
@@ -186,14 +206,18 @@ func (l *OnlineAPILogic) ImportAll(req *types.OnlineImportAllReq, workspaceId st
 			}
 		case "hunter":
 			client := onlineapi.NewHunterClient(config.Key)
-			result, err := client.Search(l.ctx, req.Query, currentPage, pageSize, "", "")
+			// Hunter API page_size 最大为100
+			hunterPageSize := pageSize
+			if hunterPageSize > 100 {
+				hunterPageSize = 100
+			}
+			result, err := client.Search(l.ctx, req.Query, currentPage, hunterPageSize, "", "")
 			if err != nil {
 				if currentPage == 1 {
 					return &types.OnlineImportAllResp{Code: 500, Msg: "查询失败: " + err.Error()}, nil
 				}
-				break
+				break PageLoop
 			}
-			total = result.Data.Total
 			for _, a := range result.Data.Arr {
 				component := ""
 				if len(a.Component) > 0 {
@@ -213,10 +237,13 @@ func (l *OnlineAPILogic) ImportAll(req *types.OnlineImportAllReq, workspaceId st
 				if currentPage == 1 {
 					return &types.OnlineImportAllResp{Code: 500, Msg: "查询失败: " + err.Error()}, nil
 				}
-				break
+				break PageLoop
 			}
-			total = result.Meta.Pagination.Total
-			for _, a := range result.Data {
+			// 检查是否配额用尽
+			if result.Data.IsExhausted {
+				break PageLoop
+			}
+			for _, a := range result.Data.Items {
 				results = append(results, types.OnlineSearchResult{
 					Host: a.Service.HTTP.Host, IP: a.IP, Port: a.Port, Protocol: a.Service.Name,
 					Title: a.Service.HTTP.Title, Server: a.Service.HTTP.Server,
@@ -251,9 +278,9 @@ func (l *OnlineAPILogic) ImportAll(req *types.OnlineImportAllReq, workspaceId st
 			}
 		}
 
-		// 计算总页数，判断是否还有下一页
-		totalPages := (total + pageSize - 1) / pageSize
-		if currentPage >= totalPages {
+		// 如果当前页返回的数据量小于 pageSize，说明已经是最后一页
+		// 注意：对于 Quake，配额用尽时会返回空数组，上面已经处理
+		if len(results) < pageSize {
 			break
 		}
 

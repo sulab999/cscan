@@ -30,6 +30,11 @@ export function updateFingerprintEnabled(data) {
   return request.post('/fingerprint/updateEnabled', data)
 }
 
+// 批量更新指纹启用状态
+export function batchUpdateFingerprintEnabled(data) {
+  return request.post('/fingerprint/batchUpdateEnabled', data)
+}
+
 // 导入指纹
 export function importFingerprints(data) {
   return request.post('/fingerprint/import', data)

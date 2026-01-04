@@ -119,3 +119,23 @@ func AssetHistoryHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 		httpx.OkJson(w, resp)
 	}
 }
+
+// AssetImportHandler 导入资产
+func AssetImportHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req types.AssetImportReq
+		if err := httpx.Parse(r, &req); err != nil {
+			response.ParamError(w, err.Error())
+			return
+		}
+
+		workspaceId := middleware.GetWorkspaceId(r.Context())
+		l := logic.NewAssetImportLogic(r.Context(), svcCtx)
+		resp, err := l.AssetImport(&req, workspaceId)
+		if err != nil {
+			response.Error(w, err)
+			return
+		}
+		httpx.OkJson(w, resp)
+	}
+}

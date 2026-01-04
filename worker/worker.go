@@ -14,26 +14,21 @@ import (
 
 	"cscan/model"
 	"cscan/pkg/mapping"
-	"cscan/rpc/task/pb"
 	"cscan/scanner"
 	"cscan/scheduler"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/shirou/gopsutil/v3/cpu"
 	"github.com/shirou/gopsutil/v3/mem"
 	"github.com/zeromicro/go-zero/core/logx"
-	"github.com/zeromicro/go-zero/zrpc"
 	"go.mongodb.org/mongo-driver/bson/primitive"
-	"google.golang.org/grpc"
 )
 
 // WorkerConfig Worker配置
 type WorkerConfig struct {
 	Name        string `json:"name"`
 	IP          string `json:"ip"`
-	ServerAddr  string `json:"serverAddr"`
-	RedisAddr   string `json:"redisAddr"`
-	RedisPass   string `json:"redisPass"`
+	ServerAddr  string `json:"serverAddr"`  // API 服务地址 (e.g., http://server:8888)
+	InstallKey  string `json:"installKey"`  // 安装密钥
 	Concurrency int    `json:"concurrency"`
 	Timeout     int    `json:"timeout"`
 }
@@ -43,8 +38,8 @@ type Worker struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	config      WorkerConfig
-	rpcClient   pb.TaskServiceClient
-	redisClient *redis.Client
+	httpClient  *WorkerHTTPClient // HTTP 客户端（替代 RPC 和 Redis）
+	wsClient    *WorkerWSClient   // WebSocket 客户端（用于日志推送和控制信号）
 	scanners    map[string]scanner.Scanner
 	taskChan    chan *scheduler.TaskInfo
 	resultChan  chan *scanner.ScanResult
@@ -62,8 +57,23 @@ type Worker struct {
 	isThrottled      bool      // 是否处于限流状态
 	throttleUntil    time.Time // 限流结束时间
 
+	// 任务控制信号
+	taskControlSignals sync.Map // taskId -> action (STOP, PAUSE)
+
+	// 正在执行的任务
+	runningTasks sync.Map // taskId -> true
+
 	// 日志组件
-	logger *WorkerLogger
+	logger Logger
+
+	// 系统信息收集器
+	sysInfoCollector *SysInfoCollector
+
+	// 文件管理器
+	fileManager *FileManager
+
+	// 终端处理器
+	terminalHandler *TerminalHandler
 }
 
 // getMainTaskId 从 taskId 中提取主任务ID
@@ -94,13 +104,14 @@ func (w *Worker) taskLog(taskId, level, format string, args ...interface{}) {
 	// 获取主任务ID，确保子任务日志也能在主任务中查看
 	mainTaskId := getMainTaskId(taskId)
 
-	logger := NewTaskLogger(w.redisClient, w.config.Name, mainTaskId)
-
 	// 如果是子任务，在日志消息前加上子任务标识
 	if mainTaskId != taskId {
 		subIndex := taskId[len(mainTaskId)+1:]
 		format = fmt.Sprintf("[Sub-%s] %s", subIndex, format)
 	}
+
+	// 使用 WebSocket 日志记录器，将日志发送到服务器
+	logger := NewTaskLoggerWS(w.config.Name, mainTaskId, w.wsClient)
 
 	switch level {
 	case LevelError:
@@ -165,71 +176,64 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 		config.IP = GetLocalIP()
 	}
 
-	// 创建RPC客户端，消息大小限制到100MB
-	client, err := zrpc.NewClient(zrpc.RpcClientConf{
-		Target: config.ServerAddr,
-	}, zrpc.WithDialOption(grpc.WithDefaultCallOptions(
-		grpc.MaxCallRecvMsgSize(100*1024*1024), // 100MB
-		grpc.MaxCallSendMsgSize(100*1024*1024), // 100MB
-	)))
-	if err != nil {
-		return nil, fmt.Errorf("connect to server failed: %v", err)
-	}
+	// 创建 HTTP 客户端（替代 RPC 和 Redis）
+	httpClient := NewWorkerHTTPClient(config.ServerAddr, config.InstallKey, config.Name)
 
-	// 创建Redis客户端（用于日志推送）
-	var redisClient *redis.Client
-	if config.RedisAddr != "" {
-		redisClient = redis.NewClient(&redis.Options{
-			Addr:     config.RedisAddr,
-			Password: config.RedisPass,
-			DB:       0,
-		})
-
-		// 测试Redis连接，增加重试机制
-		ctx := context.Background()
-		maxRetries := 3
-		for i := 0; i < maxRetries; i++ {
-			if err := redisClient.Ping(ctx).Err(); err != nil {
-				if i == maxRetries-1 {
-					fmt.Printf("[Worker] Redis connection failed after %d retries: %v, logs will be output to console\n", maxRetries, err)
-					// 不设置为nil，让日志发布器处理连接失败的情况
-				} else {
-					fmt.Printf("[Worker] Redis connection attempt %d failed: %v, retrying...\n", i+1, err)
-					time.Sleep(time.Duration(i+1) * time.Second)
-				}
-			} else {
-				fmt.Printf("[Worker] Redis connected successfully at %s, logs will be streamed\n", config.RedisAddr)
-
-				// 检查并确保 worker 名称唯一
-				config.Name = ensureUniqueWorkerName(ctx, redisClient, config.Name)
-
-				// 设置logx的输出Writer，将所有日志同时发送到Redis
-				logWriter := NewRedisLogWriter(redisClient, config.Name)
-				logx.SetWriter(logx.NewWriter(logWriter))
-				// 写入一条测试日志确认日志系统工作
-				NewLogPublisher(redisClient, config.Name).PublishWorkerLog(LevelInfo, "Worker日志系统已启动,Redis连接成功")
-				break
-			}
-		}
-	} else {
-		fmt.Println("[Worker] Redis address not specified (-r flag), logs will be output to console only")
-	}
+	fmt.Printf("[Worker] HTTP client created, API server: %s\n", config.ServerAddr)
 
 	// 创建可取消的Context
 	ctx, cancel := context.WithCancel(context.Background())
 
+	// Worker版本号
+	workerVersion := "1.0.0"
+
 	w := &Worker{
-		ctx:         ctx,
-		cancel:      cancel,
-		config:      config,
-		rpcClient:   pb.NewTaskServiceClient(client.Conn()),
-		redisClient: redisClient,
-		scanners:    make(map[string]scanner.Scanner),
-		taskChan:    make(chan *scheduler.TaskInfo, config.Concurrency),
-		resultChan:  make(chan *scanner.ScanResult, 100),
-		stopChan:    make(chan struct{}),
-		logger:      NewWorkerLogger(redisClient, config.Name),
+		ctx:              ctx,
+		cancel:           cancel,
+		config:           config,
+		httpClient:       httpClient,
+		scanners:         make(map[string]scanner.Scanner),
+		taskChan:         make(chan *scheduler.TaskInfo, config.Concurrency),
+		resultChan:       make(chan *scanner.ScanResult, 100),
+		stopChan:         make(chan struct{}),
+		logger:           NewWorkerLoggerLocal(config.Name), // 使用本地日志
+		sysInfoCollector: NewSysInfoCollector(config.Name, config.IP, workerVersion),
 	}
+
+	// 创建 WebSocket 客户端
+	wsConfig := DefaultWSClientConfig(config.ServerAddr, config.Name, config.InstallKey)
+	w.wsClient = NewWorkerWSClient(wsConfig)
+
+	// 更新 logger 为 WebSocket 版本，将日志发送到服务器
+	w.logger = NewWorkerLoggerWS(config.Name, w.wsClient)
+
+	// 设置控制信号处理函数
+	w.wsClient.SetControlHandler(func(taskId, action string) {
+		w.handleControlSignal(taskId, action)
+	})
+
+	// 设置 Worker 级别控制处理函数
+	w.wsClient.SetWorkerControlHandler(func(action, param string) {
+		w.handleWorkerControl(action, param)
+	})
+
+	// 设置Worker信息请求处理函数
+	w.wsClient.SetWorkerInfoHandler(func() *WorkerInfoPayload {
+		return w.GetWorkerInfo()
+	})
+
+	// 创建文件管理器并设置到WebSocket客户端
+	w.fileManager = NewFileManager(nil) // 使用默认配置
+	w.wsClient.SetFileHandler(w.fileManager)
+
+	// 创建终端处理器并设置到WebSocket客户端
+	w.terminalHandler = NewTerminalHandler(nil) // 使用默认配置
+	w.wsClient.SetTerminalHandler(w.terminalHandler)
+
+	// 设置终端输出回调，将输出发送到WebSocket
+	w.terminalHandler.SetOutputHandler(func(sessionId string, data []byte) {
+		w.wsClient.SendTerminalOutput(sessionId, data)
+	})
 
 	// 注册扫描器
 	w.registerScanners()
@@ -238,6 +242,105 @@ func NewWorker(config WorkerConfig) (*Worker, error) {
 	w.loadHttpServiceMappings()
 
 	return w, nil
+}
+
+// handleControlSignal 处理控制信号
+func (w *Worker) handleControlSignal(taskId, action string) {
+	w.logger.Info("Received control signal: taskId=%s, action=%s", taskId, action)
+
+	// 存储控制信号
+	w.taskControlSignals.Store(taskId, action)
+
+	// 如果是STOP信号，也存储到主任务ID
+	mainTaskId := getMainTaskId(taskId)
+	if mainTaskId != taskId {
+		w.taskControlSignals.Store(mainTaskId, action)
+	}
+}
+
+// handleWorkerControl 处理 Worker 级别控制命令
+func (w *Worker) handleWorkerControl(action, param string) {
+	w.logger.Info("Received worker control: action=%s, param=%s", action, param)
+
+	switch action {
+	case "stop":
+		w.logger.Info("Stopping worker via WebSocket command...")
+		// 在新 goroutine 中执行停止，避免死锁（因为当前在 WebSocket 读取 goroutine 中）
+		go func() {
+			w.StopImmediate()
+			os.Exit(0)
+		}()
+	case "restart":
+		w.logger.Info("Restarting worker via WebSocket command...")
+		// 在新 goroutine 中执行重启
+		go func() {
+			w.StopImmediate()
+			w.restartSelf()
+		}()
+	case "rename":
+		w.logger.Info("Renaming worker to: %s", param)
+		w.config.Name = param
+		// 更新日志前缀（使用 WebSocket 版本）
+		w.logger = NewWorkerLoggerWS(param, w.wsClient)
+	case "setConcurrency":
+		newConcurrency, err := strconv.Atoi(param)
+		if err != nil || newConcurrency < 1 {
+			w.logger.Error("Invalid concurrency value: %s", param)
+			return
+		}
+		w.logger.Info("Setting concurrency to: %d", newConcurrency)
+		w.config.Concurrency = newConcurrency
+		// 注意：增加并发数需要重启才能生效，减少并发数会在任务完成后自然生效
+	default:
+		w.logger.Warn("Unknown worker control action: %s", action)
+	}
+}
+
+// restartSelf 重新执行自身
+func (w *Worker) restartSelf() {
+	// 获取当前可执行文件路径
+	executable, err := os.Executable()
+	if err != nil {
+		w.logger.Error("Failed to get executable path: %v", err)
+		os.Exit(1)
+	}
+
+	// 获取命令行参数
+	args := os.Args
+
+	w.logger.Info("Restarting worker: %s %v", executable, args[1:])
+
+	// 等待一小段时间确保资源释放
+	time.Sleep(500 * time.Millisecond)
+
+	// 使用平台特定的重启方式
+	platformRestart(executable, args, w.logger)
+}
+
+// ClearTaskControlSignal 清除任务控制信号（任务完成后调用）
+func (w *Worker) ClearTaskControlSignal(taskId string) {
+	w.taskControlSignals.Delete(taskId)
+	mainTaskId := getMainTaskId(taskId)
+	if mainTaskId != taskId {
+		w.taskControlSignals.Delete(mainTaskId)
+	}
+}
+
+// GetWorkerInfo 获取Worker详细信息
+func (w *Worker) GetWorkerInfo() *WorkerInfoPayload {
+	w.mu.Lock()
+	taskStarted := w.taskStarted
+	taskExecuted := w.taskExecuted
+	concurrency := w.config.Concurrency
+	w.mu.Unlock()
+
+	// 计算正在运行的任务数
+	taskRunning := taskStarted - taskExecuted
+	if taskRunning < 0 {
+		taskRunning = 0
+	}
+
+	return w.sysInfoCollector.Collect(taskStarted, taskRunning, concurrency)
 }
 
 // registerScanners 注册扫描器
@@ -254,6 +357,23 @@ func (w *Worker) registerScanners() {
 // Start 启动Worker
 func (w *Worker) Start() {
 	w.isRunning = true
+
+	// 启动 WebSocket 客户端（用于日志推送和控制信号）
+	go func() {
+		if err := w.wsClient.Start(w.ctx); err != nil {
+			w.logger.Warn("WebSocket client failed to start: %v, falling back to HTTP polling", err)
+		} else {
+			w.logger.Info("WebSocket client started")
+		}
+	}()
+
+	// 等待 WebSocket 连接成功（最多等待 5 秒）
+	for i := 0; i < 50; i++ {
+		if w.wsClient.IsConnected() {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
 
 	// 启动任务处理协程
 	for i := 0; i < w.config.Concurrency; i++ {
@@ -273,15 +393,9 @@ func (w *Worker) Start() {
 	w.wg.Add(1)
 	go w.keepAlive()
 
-	// 启动状态查询订阅协程
-	if w.redisClient != nil {
-		w.wg.Add(1)
-		go w.subscribeStatusQuery()
-
-		// 启动控制命令订阅协程
-		w.wg.Add(1)
-		go w.subscribeControlCommand()
-	}
+	// 启动 HTTP 轮询回退（当 WebSocket 不可用时）
+	w.wg.Add(1)
+	go w.controlPolling()
 
 	w.logger.Info("Worker %s started with %d workers", w.config.Name, w.config.Concurrency)
 }
@@ -330,21 +444,17 @@ func (w *Worker) pullTask() bool {
 		return false
 	}
 
-	// 通过 RPC 获取任务
-	resp, err := w.rpcClient.CheckTask(ctx, &pb.CheckTaskReq{
-		TaskId: w.config.Name,
-	})
+	// 通过 HTTP 接口获取任务
+	resp, err := w.httpClient.CheckTask(ctx)
 	if err != nil {
 		return false
 	}
 
 	if resp.IsExist && !resp.IsFinished {
 		// 有待执行的任务
-		// MainTaskId 需要提取主任务ID（子任务格式: {mainTaskId}-{index}）
-		// 这样资产保存时使用主任务ID，报告查询才能正确关联
 		task := &scheduler.TaskInfo{
 			TaskId:      resp.TaskId,
-			MainTaskId:  getMainTaskId(resp.TaskId),
+			MainTaskId:  resp.MainTaskId,
 			WorkspaceId: resp.WorkspaceId,
 			TaskName:    "scan",
 			Config:      resp.Config,
@@ -359,15 +469,17 @@ func (w *Worker) pullTask() bool {
 func (w *Worker) Stop() {
 	w.isRunning = false
 
-	// 主动清理 Redis 中的状态数据，让 Worker 立即从列表中消失
-	if w.redisClient != nil {
-		ctx := context.Background()
-		key := fmt.Sprintf("worker:%s", w.config.Name)
-		w.redisClient.Del(ctx, key)
-	}
+	// 通知服务器Worker即将离线，删除Redis状态数据
+	w.notifyOffline()
 
 	w.cancel() // 通知所有 goroutine 停止
 	close(w.stopChan)
+
+	// 关闭 WebSocket 客户端
+	if w.wsClient != nil {
+		w.wsClient.Close()
+	}
+
 	w.wg.Wait()
 	w.logger.Info("Worker %s stopped", w.config.Name)
 }
@@ -376,17 +488,37 @@ func (w *Worker) Stop() {
 func (w *Worker) StopImmediate() {
 	w.isRunning = false
 
-	// 主动清理 Redis 中的状态数据
-	if w.redisClient != nil {
-		ctx := context.Background()
-		key := fmt.Sprintf("worker:%s", w.config.Name)
-		w.redisClient.Del(ctx, key)
-	}
+	// 通知服务器Worker即将离线，删除Redis状态数据
+	w.notifyOffline()
 
 	w.cancel() // 通知所有 goroutine 停止
 	close(w.stopChan)
+
+	// 关闭 WebSocket 客户端
+	if w.wsClient != nil {
+		w.wsClient.Close()
+	}
+
 	// 不等待 wg.Wait()，立即返回，跳过当前正在执行的任务
 	w.logger.Info("Worker %s stopped immediately (tasks skipped)", w.config.Name)
+}
+
+// notifyOffline 通知服务器Worker即将离线
+func (w *Worker) notifyOffline() {
+	if w.httpClient == nil {
+		return
+	}
+
+	// 使用独立的context，不受w.ctx取消影响
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	_, err := w.httpClient.NotifyOffline(ctx)
+	if err != nil {
+		w.logger.Warn("Failed to notify server about offline: %v", err)
+	} else {
+		w.logger.Info("Notified server about offline")
+	}
 }
 
 // SubmitTask 提交任务
@@ -416,29 +548,21 @@ func (w *Worker) processTask() {
 
 // checkTaskControl 检查任务控制信号
 // 返回: "PAUSE" - 暂停, "STOP" - 停止, "" - 继续执行
-// 对于子任务，会同时检查主任务的控制信号
 func (w *Worker) checkTaskControl(ctx context.Context, taskId string) string {
-	if w.redisClient == nil {
-		return ""
+	// 从控制信号映射中检查
+	if signal, ok := w.taskControlSignals.Load(taskId); ok {
+		if action, ok := signal.(string); ok {
+			return action
+		}
 	}
 
-	// 使用独立的 context 查询 Redis，避免因任务 context 被取消而查询失败
-	queryCtx := context.Background()
-
-	// 先检查当前任务的控制信号
-	ctrlKey := "cscan:task:ctrl:" + taskId
-	ctrl, err := w.redisClient.Get(queryCtx, ctrlKey).Result()
-	if err == nil && ctrl != "" {
-		return ctrl
-	}
-
-	// 如果是子任务，还需要检查主任务的控制信号
+	// 也检查主任务ID的控制信号
 	mainTaskId := getMainTaskId(taskId)
 	if mainTaskId != taskId {
-		mainCtrlKey := "cscan:task:ctrl:" + mainTaskId
-		ctrl, err = w.redisClient.Get(queryCtx, mainCtrlKey).Result()
-		if err == nil && ctrl != "" {
-			return ctrl
+		if signal, ok := w.taskControlSignals.Load(mainTaskId); ok {
+			if action, ok := signal.(string); ok {
+				return action
+			}
 		}
 	}
 
@@ -462,8 +586,8 @@ func (w *Worker) saveTaskProgress(ctx context.Context, task *scheduler.TaskInfo,
 	}
 	stateJson, _ := json.Marshal(state)
 
-	// 通过RPC保存到数据库
-	w.rpcClient.UpdateTask(ctx, &pb.UpdateTaskReq{
+	// 通过 HTTP 接口保存到数据库
+	w.httpClient.UpdateTask(ctx, &TaskUpdateReq{
 		TaskId: task.TaskId,
 		State:  "PAUSED",
 		Result: string(stateJson),
@@ -506,6 +630,30 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 	w.mu.Lock()
 	w.taskStarted++
 	w.mu.Unlock()
+
+	// 注册正在执行的任务
+	w.runningTasks.Store(task.TaskId, true)
+	mainTaskId := getMainTaskId(task.TaskId)
+	if mainTaskId != task.TaskId {
+		w.runningTasks.Store(mainTaskId, true)
+	}
+
+	// 使用 defer 确保无论任务如何结束，taskExecuted 都会递增
+	// 这样 runningCount (taskStarted - taskExecuted) 才能正确反映正在执行的任务数
+	defer func() {
+		w.mu.Lock()
+		w.taskExecuted++
+		w.mu.Unlock()
+
+		// 注销正在执行的任务
+		w.runningTasks.Delete(task.TaskId)
+		if mainTaskId != task.TaskId {
+			w.runningTasks.Delete(mainTaskId)
+		}
+
+		// 清除控制信号
+		w.ClearTaskControlSignal(task.TaskId)
+	}()
 
 	// 检查是否有停止信号（任务可能在队列中被停止)
 	if ctrl := w.checkTaskControl(baseCtx, task.TaskId); ctrl == "STOP" {
@@ -648,11 +796,9 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 			w.taskLog(task.TaskId, level, format, args...)
 		}
 
-		// 通过RPC获取Subfinder配置
+		// 通过 HTTP 接口获取 Subfinder 配置
 		var providerConfig map[string][]string
-		providerResp, err := w.rpcClient.GetSubfinderProviders(ctx, &pb.GetSubfinderProvidersReq{
-			WorkspaceId: task.WorkspaceId,
-		})
+		providerResp, err := w.httpClient.GetSubfinderProviders(ctx, task.WorkspaceId)
 		if err != nil {
 			w.taskLog(task.TaskId, LevelWarn, "Failed to get subfinder providers: %v", err)
 		} else if providerResp != nil && len(providerResp.Providers) > 0 {
@@ -728,6 +874,8 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 		}
 
 		completedPhases["domainscan"] = true
+		// 子域名扫描模块完成，递增子任务进度
+		w.incrSubTaskDone(ctx, task, "子域名扫描")
 	}
 
 	// 执行端口扫描
@@ -853,6 +1001,8 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 
 		portCancel() // 释放端口扫描上下文
 		completedPhases["portscan"] = true
+		// 端口扫描模块完成，递增子任务进度
+		w.incrSubTaskDone(ctx, task, "端口扫描")
 	}
 
 	// 检查控制信号
@@ -866,27 +1016,36 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 	}
 
 	// 执行端口识别（Nmap服务识别）- 独立阶段
-	if config.PortIdentify != nil && config.PortIdentify.Enable && len(allAssets) > 0 && !completedPhases["portidentify"] {
-		// 检查控制信号
-		if ctrl := w.checkTaskControl(ctx, task.TaskId); ctrl == "STOP" {
-			w.taskLog(task.TaskId, LevelInfo, "Task stopped")
-			return
-		} else if ctrl == "PAUSE" {
-			w.taskLog(task.TaskId, LevelInfo, "Task paused, saving progress...")
-			w.saveTaskProgress(ctx, task, completedPhases, allAssets)
-			return
-		}
+	if config.PortIdentify != nil && config.PortIdentify.Enable && !completedPhases["portidentify"] {
+		// 没有资产时跳过实际扫描，但仍需递增进度
+		if len(allAssets) == 0 {
+			w.taskLog(task.TaskId, LevelInfo, "Port identify: skipped (no assets)")
+			completedPhases["portidentify"] = true
+			w.incrSubTaskDone(ctx, task, "端口识别")
+		} else {
+			// 检查控制信号
+			if ctrl := w.checkTaskControl(ctx, task.TaskId); ctrl == "STOP" {
+				w.taskLog(task.TaskId, LevelInfo, "Task stopped")
+				return
+			} else if ctrl == "PAUSE" {
+				w.taskLog(task.TaskId, LevelInfo, "Task paused, saving progress...")
+				w.saveTaskProgress(ctx, task, completedPhases, allAssets)
+				return
+			}
 
-		// 更新当前阶段
-		w.updateTaskProgressWithPhase(ctx, task.TaskId, 40, "端口识别中", "端口识别")
+			// 更新当前阶段
+			w.updateTaskProgressWithPhase(ctx, task.TaskId, 40, "端口识别中", "端口识别")
 
-		identifiedAssets := w.executePortIdentify(ctx, task, allAssets, config.PortIdentify)
-		if len(identifiedAssets) > 0 {
-			allAssets = identifiedAssets
-			// 端口识别完成后保存更新结果
-			w.saveAssetResult(ctx, task.WorkspaceId, task.MainTaskId, orgId, allAssets)
+			identifiedAssets := w.executePortIdentify(ctx, task, allAssets, config.PortIdentify)
+			if len(identifiedAssets) > 0 {
+				allAssets = identifiedAssets
+				// 端口识别完成后保存更新结果
+				w.saveAssetResult(ctx, task.WorkspaceId, task.MainTaskId, orgId, allAssets)
+			}
+			completedPhases["portidentify"] = true
+			// 端口识别模块完成，递增子任务进度
+			w.incrSubTaskDone(ctx, task, "端口识别")
 		}
-		completedPhases["portidentify"] = true
 	}
 
 	// 检查控制信号
@@ -900,12 +1059,18 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 	}
 
 	// 执行指纹识别
-	if config.Fingerprint != nil && config.Fingerprint.Enable && len(allAssets) > 0 && !completedPhases["fingerprint"] {
-		// 在指纹识别开始前检查停止信号
-		if ctrl := w.checkTaskControl(ctx, task.TaskId); ctrl == "STOP" {
-			w.taskLog(task.TaskId, LevelInfo, "Task stopped")
-			return
-		} else if ctrl == "PAUSE" {
+	if config.Fingerprint != nil && config.Fingerprint.Enable && !completedPhases["fingerprint"] {
+		// 没有资产时跳过实际扫描，但仍需递增进度
+		if len(allAssets) == 0 {
+			w.taskLog(task.TaskId, LevelInfo, "Fingerprint: skipped (no assets)")
+			completedPhases["fingerprint"] = true
+			w.incrSubTaskDone(ctx, task, "指纹识别")
+		} else {
+			// 在指纹识别开始前检查停止信号
+			if ctrl := w.checkTaskControl(ctx, task.TaskId); ctrl == "STOP" {
+				w.taskLog(task.TaskId, LevelInfo, "Task stopped")
+				return
+			} else if ctrl == "PAUSE" {
 			w.taskLog(task.TaskId, LevelInfo, "Task paused, saving progress...")
 			w.saveTaskProgress(ctx, task, completedPhases, allAssets)
 			return
@@ -991,6 +1156,9 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 			}
 		}
 		completedPhases["fingerprint"] = true
+		// 指纹识别模块完成，递增子任务进度
+		w.incrSubTaskDone(ctx, task, "指纹识别")
+		} // 结束 len(allAssets) > 0 的 else 分支
 	}
 
 	// 检查控制信号
@@ -1004,10 +1172,16 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 	}
 
 	// 执行POC扫描 (使用Nuclei引擎)
-	if config.PocScan != nil && config.PocScan.Enable && len(allAssets) > 0 && !completedPhases["pocscan"] {
-		// 在POC扫描开始前检查停止信号
-		if ctrl := w.checkTaskControl(ctx, task.TaskId); ctrl == "STOP" {
-			w.taskLog(task.TaskId, LevelInfo, "Task stopped")
+	if config.PocScan != nil && config.PocScan.Enable && !completedPhases["pocscan"] {
+		// 没有资产时跳过实际扫描，但仍需递增进度
+		if len(allAssets) == 0 {
+			w.taskLog(task.TaskId, LevelInfo, "POC scan: skipped (no assets)")
+			completedPhases["pocscan"] = true
+			w.incrSubTaskDone(ctx, task, "漏洞扫描")
+		} else {
+			// 在POC扫描开始前检查停止信号
+			if ctrl := w.checkTaskControl(ctx, task.TaskId); ctrl == "STOP" {
+				w.taskLog(task.TaskId, LevelInfo, "Task stopped")
 			return
 		} else if ctrl == "PAUSE" {
 			w.taskLog(task.TaskId, LevelInfo, "Task paused, saving progress...")
@@ -1060,8 +1234,8 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 				// 用于统计漏洞数量
 				var vulCount int
 
-				// 创建漏洞缓冲区，10个漏洞批量保存一次
-				vulBuffer := NewVulnerabilityBuffer(10)
+				// 创建漏洞缓冲区，发现漏洞立即保存
+				vulBuffer := NewVulnerabilityBuffer(1)
 
 				// 获取单目标超时配置
 				targetTimeout := config.PocScan.TargetTimeout
@@ -1170,6 +1344,9 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 				}
 			}
 		}
+		// POC扫描模块完成，递增子任务进度
+		w.incrSubTaskDone(ctx, task, "漏洞扫描")
+		} // 结束 len(allAssets) > 0 的 else 分支
 	}
 
 	// 更新任务状态为完成
@@ -1177,15 +1354,12 @@ func (w *Worker) executeTask(task *scheduler.TaskInfo) {
 	result := fmt.Sprintf("Assets:%d Vuls:%d Duration:%.0fs", len(allAssets), len(allVuls), duration)
 	w.updateTaskStatus(ctx, task.TaskId, scheduler.TaskStatusSuccess, result)
 	w.taskLog(task.TaskId, LevelInfo, "Completed: %s", result)
-
-	w.mu.Lock()
-	w.taskExecuted++
-	w.mu.Unlock()
+	// 注意：taskExecuted 由 defer 递增，无需在此处理
 }
 
 // updateTaskStatus 更新任务状态
 func (w *Worker) updateTaskStatus(ctx context.Context, taskId, status, result string) {
-	// 如果任务完成（SUCCESS/FAILURE），同时更新Redis中的进度
+	// 如果任务完成（SUCCESS/FAILURE），同时更新进度
 	if status == scheduler.TaskStatusSuccess || status == scheduler.TaskStatusFailure {
 		progress := 100
 		if status == scheduler.TaskStatusFailure {
@@ -1194,7 +1368,8 @@ func (w *Worker) updateTaskStatus(ctx context.Context, taskId, status, result st
 		w.updateTaskProgressWithPhase(ctx, taskId, progress, result, "完成")
 	}
 
-	_, err := w.rpcClient.UpdateTask(ctx, &pb.UpdateTaskReq{
+	// 通过 HTTP 接口更新任务状态
+	_, err := w.httpClient.UpdateTask(ctx, &TaskUpdateReq{
 		TaskId: taskId,
 		State:  status,
 		Worker: w.config.Name,
@@ -1205,40 +1380,54 @@ func (w *Worker) updateTaskStatus(ctx context.Context, taskId, status, result st
 	}
 }
 
-// updateTaskProgress 更新任务进度（通过Redis）
+// updateTaskProgress 更新任务进度
+// 注意：进度更新现在通过 HTTP 接口完成
 func (w *Worker) updateTaskProgress(ctx context.Context, taskId string, progress int, message string) {
 	w.updateTaskProgressWithPhase(ctx, taskId, progress, message, "")
 }
 
-// updateTaskProgressWithPhase 更新任务进度和当前阶段（通过Redis）
+// updateTaskProgressWithPhase 更新任务进度和当前阶段
+// 注意：进度更新现在通过 HTTP 接口完成，不再直接写 Redis
 func (w *Worker) updateTaskProgressWithPhase(ctx context.Context, taskId string, progress int, message string, currentPhase string) {
-	if w.redisClient == nil {
+	// 通过 HTTP 接口更新任务状态
+	// 进度信息包含在任务状态更新中
+	if w.httpClient != nil && currentPhase != "" {
+		_, err := w.httpClient.UpdateTask(ctx, &TaskUpdateReq{
+			TaskId:   taskId,
+			Progress: progress,
+			Phase:    currentPhase,
+			Result:   message,
+		})
+		if err != nil {
+			w.taskLog(taskId, LevelError, "update task progress failed: %v", err)
+		}
+	}
+}
+
+// incrSubTaskDone 递增子任务完成数（模块级别）
+// 每完成一个扫描模块就调用此方法，通知主任务进度更新
+func (w *Worker) incrSubTaskDone(ctx context.Context, task *scheduler.TaskInfo, phase string) {
+	if w.httpClient == nil {
 		return
 	}
 
-	// 获取主任务ID
-	mainTaskId := getMainTaskId(taskId)
-
-	// 更新子任务进度到Redis（每个子任务独立的key）
-	subKey := fmt.Sprintf("cscan:task:progress:sub:%s", taskId)
-	subData := map[string]interface{}{
-		"taskId":       taskId,
-		"progress":     progress,
-		"message":      message,
-		"currentPhase": currentPhase,
-		"updateTime":   time.Now().Local().Format("2006-01-02 15:04:05"),
+	// 通过 HTTP 接口递增子任务完成数
+	resp, err := w.httpClient.IncrSubTaskDone(ctx, &SubTaskDoneReq{
+		TaskId:      task.TaskId,
+		MainTaskId:  task.MainTaskId,
+		WorkspaceId: task.WorkspaceId,
+		Phase:       phase,
+	})
+	if err != nil {
+		w.taskLog(task.TaskId, LevelError, "Failed to incr sub task done: %v", err)
+		return
 	}
-	subJsonData, _ := json.Marshal(subData)
-	w.redisClient.Set(ctx, subKey, subJsonData, 30*time.Minute)
 
-	// 同时更新主任务的当前阶段（用于显示）
-	mainKey := fmt.Sprintf("cscan:task:progress:%s", mainTaskId)
-	mainData := map[string]interface{}{
-		"currentPhase": currentPhase,
-		"updateTime":   time.Now().Local().Format("2006-01-02 15:04:05"),
+	if resp.AllDone {
+		w.taskLog(task.TaskId, LevelInfo, "All sub-tasks completed: %d/%d", resp.SubTaskDone, resp.SubTaskCount)
+	} else {
+		w.taskLog(task.TaskId, LevelDebug, "Sub-task progress: %d/%d (phase: %s)", resp.SubTaskDone, resp.SubTaskCount, phase)
 	}
-	mainJsonData, _ := json.Marshal(mainData)
-	w.redisClient.Set(ctx, mainKey, mainJsonData, 30*time.Minute)
 }
 
 // saveAssetResult 保存资产结果
@@ -1264,10 +1453,10 @@ func (w *Worker) saveAssetResult(ctx context.Context, workspaceId, mainTaskId, o
 		}
 
 		batchAssets := assets[start:end]
-		pbAssets := make([]*pb.AssetDocument, 0, len(batchAssets))
+		httpAssets := make([]AssetDocument, 0, len(batchAssets))
 
 		for _, asset := range batchAssets {
-			pbAsset := &pb.AssetDocument{
+			httpAsset := AssetDocument{
 				Authority:  asset.Authority,
 				Host:       asset.Host,
 				Port:       int32(asset.Port),
@@ -1292,29 +1481,29 @@ func (w *Worker) saveAssetResult(ctx context.Context, workspaceId, mainTaskId, o
 
 			// 添加IPv4信息
 			for _, ip := range asset.IPV4 {
-				pbAsset.Ipv4 = append(pbAsset.Ipv4, &pb.IPV4{
-					Ip:       ip.IP,
+				httpAsset.Ipv4 = append(httpAsset.Ipv4, IPV4Info{
+					IP:       ip.IP,
 					Location: ip.Location,
 				})
 			}
 
 			// 添加IPv6信息
 			for _, ip := range asset.IPV6 {
-				pbAsset.Ipv6 = append(pbAsset.Ipv6, &pb.IPV6{
-					Ip:       ip.IP,
+				httpAsset.Ipv6 = append(httpAsset.Ipv6, IPV6Info{
+					IP:       ip.IP,
 					Location: ip.Location,
 				})
 			}
 
-			pbAssets = append(pbAssets, pbAsset)
+			httpAssets = append(httpAssets, httpAsset)
 		}
 
 		// 使用独立的超时上下文，每批30秒超时
 		batchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		resp, err := w.rpcClient.SaveTaskResult(batchCtx, &pb.SaveTaskResultReq{
+		resp, err := w.httpClient.SaveTaskResult(batchCtx, &TaskResultReq{
 			WorkspaceId: workspaceId,
 			MainTaskId:  mainTaskId,
-			Assets:      pbAssets,
+			Assets:      httpAssets,
 			OrgId:       orgId,
 		})
 		cancel()
@@ -1337,13 +1526,13 @@ func (w *Worker) saveVulResult(ctx context.Context, workspaceId, mainTaskId stri
 		return
 	}
 
-	pbVuls := make([]*pb.VulDocument, 0, len(vuls))
+	httpVuls := make([]VulDocument, 0, len(vuls))
 	for _, vul := range vuls {
 		// Debug: 打印证据链数据
 		w.taskLog(mainTaskId, LevelDebug, "[SaveVul] PocFile=%s, CurlCommand len=%d, Request len=%d, Response len=%d",
 			vul.PocFile, len(vul.CurlCommand), len(vul.Request), len(vul.Response))
 
-		pbVul := &pb.VulDocument{
+		httpVul := VulDocument{
 			Authority: vul.Authority,
 			Host:      vul.Host,
 			Port:      int32(vul.Port),
@@ -1357,57 +1546,58 @@ func (w *Worker) saveVulResult(ctx context.Context, workspaceId, mainTaskId stri
 
 		// 漏洞知识库关联字段
 		if vul.CvssScore > 0 {
-			pbVul.CvssScore = &vul.CvssScore
+			httpVul.CvssScore = &vul.CvssScore
 		}
 		if vul.CveId != "" {
-			pbVul.CveId = &vul.CveId
+			httpVul.CveId = &vul.CveId
 		}
 		if vul.CweId != "" {
-			pbVul.CweId = &vul.CweId
+			httpVul.CweId = &vul.CweId
 		}
 		if vul.Remediation != "" {
-			pbVul.Remediation = &vul.Remediation
+			httpVul.Remediation = &vul.Remediation
 		}
 		if len(vul.References) > 0 {
-			pbVul.References = vul.References
+			httpVul.References = vul.References
 		}
 
 		// 证据链字段
 		if vul.MatcherName != "" {
 			matcherName := vul.MatcherName
-			pbVul.MatcherName = &matcherName
+			httpVul.MatcherName = &matcherName
 		}
 		if len(vul.ExtractedResults) > 0 {
-			pbVul.ExtractedResults = vul.ExtractedResults
+			httpVul.ExtractedResults = vul.ExtractedResults
 		}
 		if vul.CurlCommand != "" {
 			curlCommand := vul.CurlCommand
-			pbVul.CurlCommand = &curlCommand
+			httpVul.CurlCommand = &curlCommand
 		}
 		if vul.Request != "" {
 			request := vul.Request
-			pbVul.Request = &request
+			httpVul.Request = &request
 		}
 		if vul.Response != "" {
 			response := vul.Response
-			pbVul.Response = &response
+			httpVul.Response = &response
 		}
 		if vul.ResponseTruncated {
 			responseTruncated := vul.ResponseTruncated
-			pbVul.ResponseTruncated = &responseTruncated
+			httpVul.ResponseTruncated = &responseTruncated
 		}
 
-		// 输出pbVul中的证据字段
-		w.taskLog(mainTaskId, LevelDebug, "[SaveVul] pbVul.CurlCommand=%v, pbVul.Request=%v, pbVul.Response=%v",
-			pbVul.CurlCommand != nil, pbVul.Request != nil, pbVul.Response != nil)
+		// 输出httpVul中的证据字段
+		w.taskLog(mainTaskId, LevelDebug, "[SaveVul] httpVul.CurlCommand=%v, httpVul.Request=%v, httpVul.Response=%v",
+			httpVul.CurlCommand != nil, httpVul.Request != nil, httpVul.Response != nil)
 
-		pbVuls = append(pbVuls, pbVul)
+		httpVuls = append(httpVuls, httpVul)
 	}
 
-	_, err := w.rpcClient.SaveVulResult(ctx, &pb.SaveVulResultReq{
+	// 通过 HTTP 接口保存漏洞结果
+	_, err := w.httpClient.SaveVulResult(ctx, &VulResultReq{
 		WorkspaceId: workspaceId,
 		MainTaskId:  mainTaskId,
-		Vuls:        pbVuls,
+		Vuls:        httpVuls,
 	})
 	if err != nil {
 		w.taskLog(mainTaskId, LevelError, "save vul result failed: %v", err)
@@ -1453,6 +1643,59 @@ func (w *Worker) keepAlive() {
 			w.sendHeartbeat()
 		}
 	}
+}
+
+// controlPolling HTTP轮询控制信号（WebSocket不可用时的回退方案）
+func (w *Worker) controlPolling() {
+	defer w.wg.Done()
+
+	ticker := time.NewTicker(2 * time.Second) // 每2秒轮询一次
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-w.stopChan:
+			return
+		case <-ticker.C:
+			// 如果WebSocket已连接，跳过HTTP轮询
+			if w.wsClient != nil && w.wsClient.IsConnected() {
+				continue
+			}
+
+			// 获取当前正在执行的任务ID列表
+			taskIds := w.getRunningTaskIds()
+			if len(taskIds) == 0 {
+				continue
+			}
+
+			// 通过HTTP轮询获取控制信号
+			ctx, cancel := context.WithTimeout(w.ctx, 5*time.Second)
+			resp, err := w.httpClient.GetTaskControlSignals(ctx, taskIds)
+			cancel()
+
+			if err != nil {
+				// 轮询失败，静默处理（避免日志刷屏）
+				continue
+			}
+
+			// 处理控制信号
+			for _, signal := range resp.Signals {
+				w.handleControlSignal(signal.TaskId, signal.Action)
+			}
+		}
+	}
+}
+
+// getRunningTaskIds 获取当前正在执行的任务ID列表
+func (w *Worker) getRunningTaskIds() []string {
+	var taskIds []string
+	w.runningTasks.Range(func(key, value interface{}) bool {
+		if taskId, ok := key.(string); ok {
+			taskIds = append(taskIds, taskId)
+		}
+		return true
+	})
+	return taskIds
 }
 
 // CPU负载阈值常量
@@ -1538,7 +1781,7 @@ func (w *Worker) sendHeartbeat() {
 		memUsed = memInfo.UsedPercent
 	}
 
-	// 确保数值有�?
+	// 确保数值有效
 	if cpuLoad < 0 || cpuLoad > 100 {
 		cpuLoad = 0.0
 	}
@@ -1554,14 +1797,16 @@ func (w *Worker) sendHeartbeat() {
 	}
 	w.mu.Unlock()
 
-	resp, err := w.rpcClient.KeepAlive(ctx, &pb.KeepAliveReq{
+	// 通过 HTTP 接口发送心跳
+	resp, err := w.httpClient.Heartbeat(ctx, &HeartbeatReq{
 		WorkerName:         w.config.Name,
+		IP:                 w.config.IP,
 		CpuLoad:            cpuLoad,
 		MemUsed:            memUsed,
 		TaskStartedNumber:  int32(w.taskStarted),
 		TaskExecutedNumber: int32(w.taskExecuted),
 		IsDaemon:           false,
-		Ip:                 w.config.IP,
+		Concurrency:        w.config.Concurrency,
 	})
 
 	// 调试：打印心跳发送的 IP
@@ -1580,107 +1825,14 @@ func (w *Worker) sendHeartbeat() {
 		os.Exit(0)
 	}
 	if resp.ManualReloadFlag {
-		w.logger.Info("received reload signal")
-		// 重新加载配置
+		w.logger.Info("received reload/restart signal, restarting worker...")
+		w.Stop()
+		os.Exit(0) // 退出后由守护进程或用户重新启动
 	}
 }
 
-// subscribeStatusQuery 订阅状态查询
-func (w *Worker) subscribeStatusQuery() {
-	defer w.wg.Done()
-
-	ctx := context.Background()
-	pubsub := w.redisClient.Subscribe(ctx, "cscan:worker:query")
-	defer pubsub.Close()
-
-	ch := pubsub.Channel()
-	w.logger.Info("Worker %s subscribed to status query channel", w.config.Name)
-
-	for {
-		select {
-		case <-w.stopChan:
-			return
-		case msg := <-ch:
-			if msg != nil {
-				// 收到查询请求，立即上报
-				w.reportStatusToRedis()
-			}
-		}
-	}
-}
-
-// reportStatusToRedis 立即上报状态到Redis
-func (w *Worker) reportStatusToRedis() {
-	if w.redisClient == nil {
-		return
-	}
-
-	ctx := context.Background()
-
-	// 快速获取CPU使用率
-	cpuPercent, _ := cpu.Percent(0, false)
-	memInfo, _ := mem.VirtualMemory()
-
-	cpuLoad := 0.0
-	if len(cpuPercent) > 0 {
-		cpuLoad = cpuPercent[0]
-	}
-	memUsed := 0.0
-	if memInfo != nil {
-		memUsed = memInfo.UsedPercent
-	}
-
-	// 确保数值
-	if cpuLoad < 0 || cpuLoad > 100 {
-		cpuLoad = 0.0
-	}
-	if memUsed < 0 || memUsed > 100 {
-		memUsed = 0.0
-	}
-
-	w.mu.Lock()
-	taskStarted := w.taskStarted
-	taskExecuted := w.taskExecuted
-	isThrottled := w.isThrottled
-	cpuOverloadCount := w.cpuOverloadCount
-	w.mu.Unlock()
-
-	// 计算健康状态
-	healthStatus := "healthy"
-	if isThrottled {
-		healthStatus = "throttled"
-	} else if cpuLoad >= CPULoadThreshold {
-		healthStatus = "overloaded"
-	} else if cpuLoad >= CPULoadRecovery {
-		healthStatus = "warning"
-	}
-
-	// 保存状态到Redis
-	key := fmt.Sprintf("worker:%s", w.config.Name)
-	status := map[string]interface{}{
-		"workerName":         w.config.Name,
-		"ip":                 w.config.IP,
-		"cpuLoad":            cpuLoad,
-		"memUsed":            memUsed,
-		"taskStartedNumber":  taskStarted,
-		"taskExecutedNumber": taskExecuted,
-		"isDaemon":           false,
-		"healthStatus":       healthStatus,
-		"isThrottled":        isThrottled,
-		"cpuOverloadCount":   cpuOverloadCount,
-		"concurrency":        w.config.Concurrency,
-		"runningTasks":       len(w.taskChan),
-		"updateTime":         time.Now().Local().Format("2006-01-02 15:04:05"),
-		// 工具安装状态
-		"tools": map[string]bool{
-			"nmap":    scanner.CheckNmapInstalled(),
-			"masscan": scanner.CheckMasscanInstalled(),
-		},
-	}
-
-	data, _ := json.Marshal(status)
-	w.redisClient.Set(ctx, key, data, 2*time.Minute) // 2分钟过期，离线Worker会更快从列表消失
-}
+// NOTE: subscribeStatusQuery 已移除，将在 Task 6 中通过 WebSocket 实现
+// NOTE: reportStatusToRedis 已移除，将在 Task 6 中通过 WebSocket 实现
 
 // GetWorkerName 获取Worker名称
 func GetWorkerName() string {
@@ -1700,37 +1852,7 @@ func randomSuffix(length int) string {
 	return string(b)
 }
 
-// ensureUniqueWorkerName 确保 worker 名称唯一，如果存在同名则自动生成新名称
-func ensureUniqueWorkerName(ctx context.Context, redisClient *redis.Client, name string) string {
-	if redisClient == nil {
-		return name
-	}
-
-	// 检查是否存在同名 worker（通过心跳 key 判断）
-	key := "cscan:worker:heartbeat:" + name
-	exists, err := redisClient.Exists(ctx, key).Result()
-	if err != nil || exists == 0 {
-		// 不存在同名 worker，直接使用
-		return name
-	}
-
-	// 存在同名 worker，生成新名称
-	baseName := name
-	for i := 1; i <= 100; i++ {
-		newName := fmt.Sprintf("%s-%s", baseName, randomSuffix(4))
-		key = "cscan:worker:heartbeat:" + newName
-		exists, err = redisClient.Exists(ctx, key).Result()
-		if err != nil || exists == 0 {
-			fmt.Printf("[Worker] Name conflict detected, renamed from '%s' to '%s'\n", baseName, newName)
-			return newName
-		}
-	}
-
-	// 极端情况：100次都冲突，使用时间戳
-	newName := fmt.Sprintf("%s-%d", baseName, time.Now().UnixNano())
-	fmt.Printf("[Worker] Name conflict detected, renamed from '%s' to '%s'\n", baseName, newName)
-	return newName
-}
+// NOTE: ensureUniqueWorkerName 已移除，将在 Task 6 中通过 WebSocket 实现
 
 // GetLocalIP 获取本机IP地址
 func GetLocalIP() string {
@@ -1814,23 +1936,24 @@ func (w *Worker) generateAutoTags(assets []*scanner.Asset, pocConfig *scheduler.
 	return tags
 }
 
-// getTemplatesByTags 通过RPC从数据库获取符合标签
+// getTemplatesByTags 通过 HTTP 接口从数据库获取符合标签的模板
 func (w *Worker) getTemplatesByTags(ctx context.Context, tags []string, severities []string) []string {
 	if len(tags) == 0 {
 		return nil
 	}
 
-	resp, err := w.rpcClient.GetTemplatesByTags(ctx, &pb.GetTemplatesByTagsReq{
+	// 通过 HTTP 接口获取模板
+	resp, err := w.httpClient.GetTemplates(ctx, &TemplatesReq{
 		Tags:       tags,
 		Severities: severities,
 	})
 	if err != nil {
-		w.logger.Error("GetTemplatesByTags RPC failed: %v", err)
+		w.logger.Error("GetTemplates HTTP failed: %v", err)
 		return nil
 	}
 
 	if !resp.Success {
-		w.logger.Error("GetTemplatesByTags failed: %s", resp.Message)
+		w.logger.Error("GetTemplates failed: %s", resp.Msg)
 		return nil
 	}
 
@@ -1838,23 +1961,24 @@ func (w *Worker) getTemplatesByTags(ctx context.Context, tags []string, severiti
 	return resp.Templates
 }
 
-// getTemplatesByIds 通过RPC根据ID列表获取模板内容
+// getTemplatesByIds 通过 HTTP 接口根据ID列表获取模板内容
 func (w *Worker) getTemplatesByIds(ctx context.Context, nucleiTemplateIds, customPocIds []string) []string {
 	if len(nucleiTemplateIds) == 0 && len(customPocIds) == 0 {
 		return nil
 	}
 
-	resp, err := w.rpcClient.GetTemplatesByIds(ctx, &pb.GetTemplatesByIdsReq{
+	// 通过 HTTP 接口获取模板
+	resp, err := w.httpClient.GetTemplates(ctx, &TemplatesReq{
 		NucleiTemplateIds: nucleiTemplateIds,
 		CustomPocIds:      customPocIds,
 	})
 	if err != nil {
-		w.logger.Error("GetTemplatesByIds RPC failed: %v", err)
+		w.logger.Error("GetTemplates HTTP failed: %v", err)
 		return nil
 	}
 
 	if !resp.Success {
-		w.logger.Error("GetTemplatesByIds failed: %s", resp.Message)
+		w.logger.Error("GetTemplates failed: %s", resp.Msg)
 		return nil
 	}
 
@@ -1869,25 +1993,26 @@ func parseAppName(app string) string {
 	if idx := strings.Index(appName, "["); idx > 0 {
 		appName = appName[:idx]
 	}
-	// 再去�?:version 后缀
+	// 再去除 :version 后缀
 	if idx := strings.Index(appName, ":"); idx > 0 {
 		appName = appName[:idx]
 	}
 	return strings.TrimSpace(appName)
 }
 
-// loadCustomFingerprints 加载自定义指纹到指纹扫描�?
+// loadCustomFingerprints 加载自定义指纹到指纹扫描器
 func (w *Worker) loadCustomFingerprints(ctx context.Context, fpScanner *scanner.FingerprintScanner) {
-	resp, err := w.rpcClient.GetCustomFingerprints(ctx, &pb.GetCustomFingerprintsReq{
+	// 通过 HTTP 接口获取指纹配置
+	resp, err := w.httpClient.GetFingerprints(ctx, &FingerprintsReq{
 		EnabledOnly: true,
 	})
 	if err != nil {
-		w.logger.Error("GetCustomFingerprints RPC failed: %v", err)
+		w.logger.Error("GetFingerprints HTTP failed: %v", err)
 		return
 	}
 
 	if !resp.Success {
-		w.logger.Error("GetCustomFingerprints failed: %s", resp.Message)
+		w.logger.Error("GetFingerprints failed: %s", resp.Msg)
 		return
 	}
 
@@ -2013,13 +2138,10 @@ func (w *Worker) executePocValidateTask(ctx context.Context, task *scheduler.Tas
 	var pocName string
 	var pocSeverity string
 
-	// 如果指定了pocId，通过RPC获取POC内容
+	// 如果指定了pocId，通过 HTTP 接口获取POC内容
 	if pocId != "" {
 		w.taskLog(task.TaskId, LevelInfo, "[%s] Loading POC template...", task.TaskId)
-		resp, err := w.rpcClient.GetPocById(ctx, &pb.GetPocByIdReq{
-			PocId:   pocId,
-			PocType: pocType,
-		})
+		resp, err := w.httpClient.GetPocById(ctx, pocId, pocType)
 		if err != nil {
 			w.taskLog(task.TaskId, LevelError, "[%s] POC validation failed: failed to get POC - %v", task.TaskId, err)
 			w.updateTaskStatus(ctx, task.TaskId, scheduler.TaskStatusFailure, "Failed to get POC: "+err.Error())
@@ -2027,9 +2149,9 @@ func (w *Worker) executePocValidateTask(ctx context.Context, task *scheduler.Tas
 			return
 		}
 		if !resp.Success {
-			w.taskLog(task.TaskId, LevelError, "[%s] POC validation failed: POC not found - %s", task.TaskId, resp.Message)
-			w.updateTaskStatus(ctx, task.TaskId, scheduler.TaskStatusFailure, "POC not found: "+resp.Message)
-			w.savePocValidationResult(ctx, task.TaskId, batchId, nil, "POC not found: "+resp.Message)
+			w.taskLog(task.TaskId, LevelError, "[%s] POC validation failed: POC not found - %s", task.TaskId, resp.Msg)
+			w.updateTaskStatus(ctx, task.TaskId, scheduler.TaskStatusFailure, "POC not found: "+resp.Msg)
+			w.savePocValidationResult(ctx, task.TaskId, batchId, nil, "POC not found: "+resp.Msg)
 			return
 		}
 		if resp.Content == "" {
@@ -2169,10 +2291,7 @@ func (w *Worker) executePocValidateTask(ctx context.Context, task *scheduler.Tas
 	// 更新任务状态
 	resultMsg := fmt.Sprintf("Validation completed: matched=%v, vuls=%d, duration=%.2fs", matched, vulCount, duration)
 	w.updateTaskStatus(ctx, task.TaskId, scheduler.TaskStatusSuccess, resultMsg)
-
-	w.mu.Lock()
-	w.taskExecuted++
-	w.mu.Unlock()
+	// 注意：taskExecuted 由 executeTask 的 defer 递增，无需在此处理
 }
 
 // executePocBatchValidateTask 执行POC批量验证任务（使用单个Nuclei引擎扫描所有目标）
@@ -2230,10 +2349,7 @@ func (w *Worker) executePocBatchValidateTask(ctx context.Context, task *schedule
 
 	if pocId != "" {
 		w.taskLog(task.TaskId, LevelInfo, "[%s] Loading POC template...", task.TaskId)
-		resp, err := w.rpcClient.GetPocById(ctx, &pb.GetPocByIdReq{
-			PocId:   pocId,
-			PocType: pocType,
-		})
+		resp, err := w.httpClient.GetPocById(ctx, pocId, pocType)
 		if err != nil {
 			w.taskLog(task.TaskId, LevelError, "[%s] POC批量扫描失败: 获取POC失败 - %v", task.TaskId, err)
 			w.updateTaskStatus(ctx, task.TaskId, scheduler.TaskStatusFailure, "获取POC失败: "+err.Error())
@@ -2262,6 +2378,12 @@ func (w *Worker) executePocBatchValidateTask(ctx context.Context, task *schedule
 		Timeout:         int(timeout),
 		CustomTemplates: templates,
 		CustomPocOnly:   true,
+		// 设置回调函数，发现漏洞时立即保存到数据库
+		OnVulnerabilityFound: func(vul *scanner.Vulnerability) {
+			w.taskLog(task.TaskId, LevelInfo, "[%s] Vulnerability found! %s → %s", task.TaskId, vul.PocFile, vul.Url)
+			// 立即保存到数据库
+			w.saveVulResult(ctx, workspaceId, task.TaskId, []*scanner.Vulnerability{vul})
+		},
 	}
 
 	// 使用批量扫描方法
@@ -2280,10 +2402,9 @@ func (w *Worker) executePocBatchValidateTask(ctx context.Context, task *schedule
 	vulCount := len(vuls)
 	w.taskLog(task.TaskId, LevelInfo, "[%s] Batch scan completed, duration: %.2fs, vuls: %d", task.TaskId, duration, vulCount)
 
-	// 保存漏洞到数据库
+	// 漏洞已在回调中实时保存，这里不需要再保存
 	if vulCount > 0 {
-		w.saveVulResult(ctx, workspaceId, task.TaskId, vuls)
-		w.taskLog(task.TaskId, LevelInfo, "[%s] Saved %d vulnerabilities to database", task.TaskId, vulCount)
+		w.taskLog(task.TaskId, LevelInfo, "[%s] Total %d vulnerabilities saved to database", task.TaskId, vulCount)
 	}
 
 	// 构建验证结果
@@ -2310,10 +2431,7 @@ func (w *Worker) executePocBatchValidateTask(ctx context.Context, task *schedule
 	// 更新任务状态
 	resultMsg := fmt.Sprintf("Batch scan completed: targets=%d, vuls=%d, duration=%.2fs", len(urls), vulCount, duration)
 	w.updateTaskStatus(ctx, task.TaskId, scheduler.TaskStatusSuccess, resultMsg)
-
-	w.mu.Lock()
-	w.taskExecuted++
-	w.mu.Unlock()
+	// 注意：taskExecuted 由 executeTask 的 defer 递增，无需在此处理
 }
 
 // PocValidationResult POC验证结果
@@ -2330,13 +2448,9 @@ type PocValidationResult struct {
 	Tags       []string `json:"tags"`
 }
 
-// savePocValidationResult 保存POC验证结果到Redis
+// savePocValidationResult 保存POC验证结果
+// NOTE: POC验证结果现在通过任务状态更新接口保存，不再直接写 Redis
 func (w *Worker) savePocValidationResult(ctx context.Context, taskId, batchId string, results []*PocValidationResult, errorMsg string) {
-	if w.redisClient == nil {
-		w.logger.Error("Redis client not available, cannot save POC validation result")
-		return
-	}
-
 	// 构建结果数据
 	resultData := map[string]interface{}{
 		"taskId":     taskId,
@@ -2357,29 +2471,18 @@ func (w *Worker) savePocValidationResult(ctx context.Context, taskId, batchId st
 		return
 	}
 
-	// 保存到Redis
-	resultKey := fmt.Sprintf("cscan:task:result:%s", taskId)
-	err = w.redisClient.Set(ctx, resultKey, resultJson, 24*time.Hour).Err()
-	if err != nil {
-		w.taskLog(taskId, LevelError, "Failed to save POC validation result to Redis: %v", err)
-		return
+	// 通过 HTTP 接口更新任务结果
+	status := scheduler.TaskStatusSuccess
+	if errorMsg != "" {
+		status = scheduler.TaskStatusFailure
 	}
-
-	// 更新任务信息状态
-	taskInfoKey := fmt.Sprintf("cscan:task:info:%s", taskId)
-	taskInfoData, err := w.redisClient.Get(ctx, taskInfoKey).Result()
-	if err == nil && taskInfoData != "" {
-		var taskInfo map[string]string
-		if json.Unmarshal([]byte(taskInfoData), &taskInfo) == nil {
-			if errorMsg != "" {
-				taskInfo["status"] = "FAILURE"
-			} else {
-				taskInfo["status"] = "SUCCESS"
-			}
-			taskInfo["updateTime"] = time.Now().Local().Format("2006-01-02 15:04:05")
-			updatedInfo, _ := json.Marshal(taskInfo)
-			w.redisClient.Set(ctx, taskInfoKey, updatedInfo, 24*time.Hour)
-		}
+	_, err = w.httpClient.UpdateTask(ctx, &TaskUpdateReq{
+		TaskId: taskId,
+		State:  status,
+		Result: string(resultJson),
+	})
+	if err != nil {
+		w.taskLog(taskId, LevelError, "Failed to save POC validation result: %v", err)
 	}
 }
 
@@ -2680,20 +2783,19 @@ func parsePortList(portsStr string) []int {
 	return ports
 }
 
-// loadHttpServiceMappings 从RPC服务加载HTTP服务映射配置
+// loadHttpServiceMappings 从 HTTP 接口加载HTTP服务映射配置
 func (w *Worker) loadHttpServiceMappings() {
 	ctx := context.Background()
 
-	resp, err := w.rpcClient.GetHttpServiceMappings(ctx, &pb.GetHttpServiceMappingsReq{
-		EnabledOnly: true,
-	})
+	// 通过 HTTP 接口获取 HTTP 服务映射
+	resp, err := w.httpClient.GetHttpServiceMappings(ctx, true)
 	if err != nil {
-		w.logger.Error("GetHttpServiceMappings RPC failed: %v, using default mappings", err)
+		w.logger.Error("GetHttpServiceMappings HTTP failed: %v, using default mappings", err)
 		return
 	}
 
 	if !resp.Success {
-		w.logger.Error("GetHttpServiceMappings failed: %s, using default mappings", resp.Message)
+		w.logger.Error("GetHttpServiceMappings failed: %s, using default mappings", resp.Msg)
 		return
 	}
 
@@ -2713,100 +2815,4 @@ func (w *Worker) loadHttpServiceMappings() {
 	w.logger.Info("Loaded %d HTTP service mappings from database", len(resp.Mappings))
 }
 
-// subscribeControlCommand 订阅控制命令
-func (w *Worker) subscribeControlCommand() {
-	defer w.wg.Done()
-
-	ctx := context.Background()
-	pubsub := w.redisClient.Subscribe(ctx, "cscan:worker:control")
-	defer pubsub.Close()
-
-	ch := pubsub.Channel()
-	w.logger.Info("Worker %s subscribed to control command channel", w.config.Name)
-
-	for {
-		select {
-		case <-w.stopChan:
-			return
-		case msg := <-ch:
-			if msg != nil {
-				w.handleControlCommand(msg.Payload)
-			}
-		}
-	}
-}
-
-// handleControlCommand 处理控制命令
-func (w *Worker) handleControlCommand(payload string) {
-	var cmd struct {
-		Action      string `json:"action"`
-		WorkerName  string `json:"workerName"`
-		NewName     string `json:"newName"`
-		Concurrency int    `json:"concurrency"`
-	}
-
-	if err := json.Unmarshal([]byte(payload), &cmd); err != nil {
-		w.logger.Error("Failed to parse control command: %v", err)
-		return
-	}
-
-	// 检查是否是发给当前Worker的命令
-	if cmd.WorkerName != "" && cmd.WorkerName != w.config.Name {
-		return
-	}
-
-	switch cmd.Action {
-	case "stop":
-		w.logger.Info("Received stop command, shutting down worker %s", w.config.Name)
-		// 触发停止
-		go func() {
-			w.Stop()
-			// 退出进程
-			os.Exit(0)
-		}()
-	case "restart":
-		w.logger.Info("Received restart command, restarting worker %s", w.config.Name)
-		go func() {
-			// 快速停止当前 Worker（跳过当前任务，不等待完成）
-			w.logger.Info("Stopping current worker immediately (skipping current tasks)...")
-			w.StopImmediate()
-			w.logger.Info("Worker stopped, restarting in same process...")
-
-			// 在同一进程内重新初始化 Worker
-			time.Sleep(1 * time.Second) // 短暂等待确保资源释放
-
-			// 创建新的 Worker 实例
-			newWorker, err := NewWorker(w.config)
-			if err != nil {
-				w.logger.Error("Failed to create new worker: %v", err)
-				os.Exit(1)
-			}
-
-			// 启动新 Worker
-			newWorker.Start()
-			w.logger.Info("Worker restarted successfully in same process")
-
-			// 阻塞等待信号（保持进程运行）
-			select {}
-		}()
-	case "rename":
-		if cmd.NewName != "" {
-			w.logger.Info("Received rename command, renaming worker from %s to %s", w.config.Name, cmd.NewName)
-			w.config.Name = cmd.NewName
-			// 立即上报新状态
-			w.reportStatusToRedis()
-		}
-	case "setConcurrency":
-		if cmd.Concurrency >= 1 && cmd.Concurrency <= 100 {
-			oldConcurrency := w.config.Concurrency
-			w.config.Concurrency = cmd.Concurrency
-			w.logger.Info("Received setConcurrency command, changed concurrency from %d to %d (note: restart required to add more workers)", oldConcurrency, cmd.Concurrency)
-			// 立即上报新状态
-			w.reportStatusToRedis()
-		} else {
-			w.logger.Warn("Invalid concurrency value: %d, must be between 1 and 100", cmd.Concurrency)
-		}
-	default:
-		w.logger.Warn("Unknown control command: %s", cmd.Action)
-	}
-}
+// NOTE: subscribeControlCommand 和 handleControlCommand 已移除，将在 Task 6 中通过 WebSocket 实现

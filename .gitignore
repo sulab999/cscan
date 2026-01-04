@@ -6,5 +6,6 @@ web/dist/
 output/
 .DS_Store
 poc/
-docker-compose.dev.yaml
 DEV.md
+docker-compose-arm64.yaml
+bin/

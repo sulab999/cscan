@@ -18,7 +18,7 @@ type Vul struct {
 	Url        string             `bson:"url" json:"url"`
 	PocFile    string             `bson:"pocfile" json:"pocFile"`
 	Source     string             `bson:"source" json:"source"`
-	Severity   string             `bson:"severity" json:"severity"`
+	Severity   string             `bson:"severity" json:"severity"` // 严重级别: critical/high/medium/low/info/unknown
 	Extra      string             `bson:"extra" json:"extra"`
 	Result     string             `bson:"result" json:"result"`
 	TaskId     string             `bson:"task_id" json:"taskId"`

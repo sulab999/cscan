@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"cscan/api/internal/svc"
@@ -48,14 +49,21 @@ func (l *WorkerListLogic) WorkerList() (resp *types.WorkerListResp, err error) {
 	// 等待Worker响应（最多等待500毫秒）
 	time.Sleep(500 * time.Millisecond)
 
-	// 从Redis获取Worker状态
-	keys, err := rdb.Keys(l.ctx, "worker:*").Result()
+	// 从Redis获取Worker状态（使用正确的键前缀）
+	keys, err := rdb.Keys(l.ctx, "cscan:worker:*").Result()
 	if err != nil {
 		return &types.WorkerListResp{Code: 500, Msg: "查询失败"}, nil
 	}
 
 	list := make([]types.Worker, 0, len(keys))
 	for _, key := range keys {
+		// 跳过非Worker状态的键（如 cscan:worker:control:*, cscan:worker:install_key 等）
+		if key == "cscan:worker:install_key" || 
+		   strings.Contains(key, ":control:") ||
+		   strings.Contains(key, ":register:") {
+			continue
+		}
+
 		data, err := rdb.Get(l.ctx, key).Result()
 		if err != nil {
 			continue
@@ -63,6 +71,11 @@ func (l *WorkerListLogic) WorkerList() (resp *types.WorkerListResp, err error) {
 
 		var status WorkerStatus
 		if err := json.Unmarshal([]byte(data), &status); err != nil {
+			continue
+		}
+
+		// 如果 WorkerName 为空，跳过
+		if status.WorkerName == "" {
 			continue
 		}
 
@@ -134,18 +147,24 @@ func (l *WorkerDeleteLogic) WorkerDelete(req *types.WorkerDeleteReq) (resp *type
 
 	rdb := l.svcCtx.RedisClient
 
-	// 1. 通过Pub/Sub发送停止命令（立即通知在线Worker）
+	// 1. 设置控制命令到 Redis（Worker 心跳时会读取）
+	ctrlKey := fmt.Sprintf("cscan:worker:control:%s", req.Name)
+	controlData := map[string]bool{"stop": true}
+	controlJson, _ := json.Marshal(controlData)
+	rdb.Set(l.ctx, ctrlKey, controlJson, 5*time.Minute) // 5分钟过期
+	l.Logger.Infof("[WorkerDelete] Set stop command for worker: %s", req.Name)
+
+	// 2. 同时通过 WebSocket 发送停止命令（如果 Worker 已连接）
+	// 这会在下次心跳前立即通知 Worker
 	stopMsg := fmt.Sprintf(`{"action":"stop","workerName":"%s"}`, req.Name)
 	rdb.Publish(l.ctx, "cscan:worker:control", stopMsg)
-	l.Logger.Infof("[WorkerDelete] Sent stop command to worker: %s", req.Name)
 
-	// 2. 删除Worker状态数据
-	workerKey := fmt.Sprintf("worker:%s", req.Name)
+	// 3. 删除Worker状态数据
+	workerKey := fmt.Sprintf("cscan:worker:%s", req.Name)
 	rdb.Del(l.ctx, workerKey)
 
-	// 3. 删除控制信号（避免新启动的同名Worker被误停止）
-	ctrlKey := fmt.Sprintf("worker_ctrl:%s", req.Name)
-	rdb.Del(l.ctx, ctrlKey)
+	// 4. 从Worker集合中移除
+	rdb.SRem(l.ctx, "cscan:workers", req.Name)
 
 	l.Logger.Infof("[WorkerDelete] Deleted worker data: %s", req.Name)
 
@@ -179,14 +198,14 @@ func (l *WorkerRenameLogic) WorkerRename(req *types.WorkerRenameReq) (resp *type
 	rdb := l.svcCtx.RedisClient
 
 	// 1. 获取原Worker状态数据
-	oldKey := fmt.Sprintf("worker:%s", req.OldName)
+	oldKey := fmt.Sprintf("cscan:worker:%s", req.OldName)
 	data, err := rdb.Get(l.ctx, oldKey).Result()
 	if err != nil {
 		return &types.WorkerRenameResp{Code: 404, Msg: "Worker不存在"}, nil
 	}
 
 	// 2. 检查新名称是否已存在
-	newKey := fmt.Sprintf("worker:%s", req.NewName)
+	newKey := fmt.Sprintf("cscan:worker:%s", req.NewName)
 	exists, _ := rdb.Exists(l.ctx, newKey).Result()
 	if exists > 0 {
 		return &types.WorkerRenameResp{Code: 400, Msg: "新名称已被使用"}, nil
@@ -206,7 +225,11 @@ func (l *WorkerRenameLogic) WorkerRename(req *types.WorkerRenameReq) (resp *type
 	// 5. 删除旧key
 	rdb.Del(l.ctx, oldKey)
 
-	// 6. 发送重命名命令给Worker（让Worker更新自己的名称）
+	// 6. 更新Worker集合
+	rdb.SRem(l.ctx, "cscan:workers", req.OldName)
+	rdb.SAdd(l.ctx, "cscan:workers", req.NewName)
+
+	// 7. 发送重命名命令给Worker（让Worker更新自己的名称）
 	renameMsg := fmt.Sprintf(`{"action":"rename","workerName":"%s","newName":"%s"}`, req.OldName, req.NewName)
 	rdb.Publish(l.ctx, "cscan:worker:control", renameMsg)
 
@@ -238,20 +261,26 @@ func (l *WorkerRestartLogic) WorkerRestart(req *types.WorkerRestartReq) (resp *t
 	rdb := l.svcCtx.RedisClient
 
 	// 检查Worker是否存在
-	workerKey := fmt.Sprintf("worker:%s", req.Name)
+	workerKey := fmt.Sprintf("cscan:worker:%s", req.Name)
 	_, err = rdb.Get(l.ctx, workerKey).Result()
 	if err != nil {
 		return &types.WorkerRestartResp{Code: 404, Msg: "Worker不存在或已离线"}, nil
 	}
 
-	// 1. 先删除Redis中的Worker状态数据，让Worker重启后重新注册
-	rdb.Del(l.ctx, workerKey)
-	l.Logger.Infof("[WorkerRestart] Deleted worker data: %s", req.Name)
+	// 1. 设置重启控制命令到 Redis（Worker 心跳时会读取）
+	ctrlKey := fmt.Sprintf("cscan:worker:control:%s", req.Name)
+	controlData := map[string]bool{"reload": true}
+	controlJson, _ := json.Marshal(controlData)
+	rdb.Set(l.ctx, ctrlKey, controlJson, 5*time.Minute) // 5分钟过期
+	l.Logger.Infof("[WorkerRestart] Set reload command for worker: %s", req.Name)
 
-	// 2. 通过Pub/Sub发送重启命令
+	// 2. 同时通过 WebSocket 发送重启命令（如果 Worker 已连接）
 	restartMsg := fmt.Sprintf(`{"action":"restart","workerName":"%s"}`, req.Name)
 	rdb.Publish(l.ctx, "cscan:worker:control", restartMsg)
-	l.Logger.Infof("[WorkerRestart] Sent restart command to worker: %s", req.Name)
+
+	// 3. 删除Redis中的Worker状态数据，让Worker重启后重新注册
+	rdb.Del(l.ctx, workerKey)
+	l.Logger.Infof("[WorkerRestart] Deleted worker data: %s", req.Name)
 
 	return &types.WorkerRestartResp{Code: 0, Msg: "重启命令已发送"}, nil
 }
@@ -283,7 +312,7 @@ func (l *WorkerSetConcurrencyLogic) WorkerSetConcurrency(req *types.WorkerSetCon
 	rdb := l.svcCtx.RedisClient
 
 	// 检查Worker是否存在
-	workerKey := fmt.Sprintf("worker:%s", req.Name)
+	workerKey := fmt.Sprintf("cscan:worker:%s", req.Name)
 	_, err = rdb.Get(l.ctx, workerKey).Result()
 	if err != nil {
 		return &types.WorkerSetConcurrencyResp{Code: 404, Msg: "Worker不存在或已离线"}, nil

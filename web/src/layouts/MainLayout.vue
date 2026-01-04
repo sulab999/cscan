@@ -17,19 +17,19 @@
           <template #title>工作台</template>
         </el-menu-item>
         <el-menu-item index="/asset-management">
-          <el-icon><DataAnalysis /></el-icon>
+          <el-icon><Monitor /></el-icon>
           <template #title>资产管理</template>
         </el-menu-item>
         <el-menu-item index="/task">
-          <el-icon><DataAnalysis /></el-icon>
+          <el-icon><List /></el-icon>
           <template #title>任务管理</template>
         </el-menu-item>
         <el-menu-item index="/online-search">
-          <el-icon><DataAnalysis /></el-icon>
+          <el-icon><Search /></el-icon>
           <template #title>在线搜索</template>
         </el-menu-item>
         <el-menu-item index="/poc">
-          <el-icon><DataAnalysis /></el-icon>
+          <el-icon><Aim /></el-icon>
           <template #title>POC管理</template>
         </el-menu-item>
         <el-menu-item index="/fingerprint">
@@ -109,7 +109,7 @@ import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { useThemeStore } from '@/stores/theme'
 import { useWorkspaceStore } from '@/stores/workspace'
-import { Setting, Sunny, Moon, Cpu, Tools, OfficeBuilding, DataAnalysis, Link, Position } from '@element-plus/icons-vue'
+import { Setting, Sunny, Moon, Cpu, Tools, OfficeBuilding, DataAnalysis, Link, Position, Monitor, List, Search, Aim, Odometer, Stamp, Connection, Fold, Expand } from '@element-plus/icons-vue'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -162,6 +162,8 @@ function handleCommand(command) {
       width: 36px;
       height: 36px;
       margin-right: 10px;
+      border-radius: 6px;
+      background: transparent;
     }
   }
 

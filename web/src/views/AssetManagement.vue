@@ -31,7 +31,8 @@
 </template>
 
 <script setup>
-import { ref, onMounted, onUnmounted, defineAsyncComponent } from 'vue'
+import { ref, onMounted, onUnmounted, watch, defineAsyncComponent } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
 // 异步加载各个视图组件
 const AssetAllView = defineAsyncComponent(() => import('@/components/asset/AssetAllView.vue'))
@@ -40,12 +41,31 @@ const DomainView = defineAsyncComponent(() => import('@/components/asset/DomainV
 const IPView = defineAsyncComponent(() => import('@/components/asset/IPView.vue'))
 const VulView = defineAsyncComponent(() => import('@/components/asset/VulView.vue'))
 
-const activeTab = ref('all')
+const route = useRoute()
+const router = useRouter()
+
+// 有效的tab名称
+const validTabs = ['all', 'site', 'domain', 'ip', 'vul']
+
+// 从URL获取初始tab，默认为'all'
+const getInitialTab = () => {
+  const tab = route.query.tab
+  return validTabs.includes(tab) ? tab : 'all'
+}
+
+const activeTab = ref(getInitialTab())
 const allViewRef = ref(null)
 const siteViewRef = ref(null)
 const domainViewRef = ref(null)
 const ipViewRef = ref(null)
 const vulViewRef = ref(null)
+
+// 监听路由变化，更新activeTab
+watch(() => route.query.tab, (newTab) => {
+  if (validTabs.includes(newTab) && newTab !== activeTab.value) {
+    activeTab.value = newTab
+  }
+})
 
 // 工作空间切换时刷新当前Tab数据
 function handleWorkspaceChanged() {
@@ -53,7 +73,8 @@ function handleWorkspaceChanged() {
 }
 
 function handleTabChange(tabName) {
-  // Tab切换时可以触发数据加载
+  // Tab切换时更新URL
+  router.replace({ query: { ...route.query, tab: tabName } })
 }
 
 // 数据变化时刷新所有Tab
@@ -88,6 +109,10 @@ function refreshCurrentTab() {
 
 onMounted(() => {
   window.addEventListener('workspace-changed', handleWorkspaceChanged)
+  // 如果URL没有tab参数，添加默认的tab参数
+  if (!route.query.tab) {
+    router.replace({ query: { ...route.query, tab: activeTab.value } })
+  }
 })
 
 onUnmounted(() => {

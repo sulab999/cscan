@@ -72,7 +72,7 @@ func NewNucleiScanner() *NucleiScanner {
 type NucleiOptions struct {
 	Templates            []string                      `json:"templates"`            // 模板路径
 	Tags                 []string                      `json:"tags"`                 // 标签过滤
-	Severity             string                        `json:"severity"`             // 严重级别: critical,high,medium,low,info (CSV格式)
+	Severity             string                        `json:"severity"`             // 严重级别: critical,high,medium,low,info,unknown (CSV格式)
 	ExcludeTags          []string                      `json:"excludeTags"`          // 排除标签
 	ExcludeTemplates     []string                      `json:"excludeTemplates"`     // 排除模板
 	RateLimit            int                           `json:"rateLimit"`            // 速率限制
@@ -266,7 +266,7 @@ func (s *NucleiScanner) scanSingleTarget(ctx context.Context, target string, opt
 	if err != nil {
 		logx.Errorf("Failed to create nuclei engine for %s: %v", target, err)
 		if taskLogger != nil {
-			taskLogger("ERROR", "Failed to create nuclei engine: %v", err)
+			taskLogger("ERROR", "POC不可用: 引擎初始化失败 - %v", err)
 		}
 		return vuls
 	}
@@ -282,7 +282,7 @@ func (s *NucleiScanner) scanSingleTarget(ctx context.Context, target string, opt
 	if err := ne.LoadAllTemplates(); err != nil {
 		logx.Errorf("Failed to load templates for %s: %v", target, err)
 		if taskLogger != nil {
-			taskLogger("ERROR", "Failed to load templates: %v", err)
+			taskLogger("ERROR", "POC不可用: 模板解析失败 - %v", err)
 		}
 		// 如果加载失败，返回空结果
 		return vuls
@@ -297,7 +297,7 @@ func (s *NucleiScanner) scanSingleTarget(ctx context.Context, target string, opt
 	if actualTemplateCount == 0 {
 		logx.Errorf("No templates loaded for %s, skipping scan", target)
 		if taskLogger != nil {
-			taskLogger("WARN", "No templates loaded, skipping scan")
+			taskLogger("ERROR", "POC不可用: 模板加载失败，请检查POC格式是否正确")
 		}
 		return vuls
 	}
@@ -878,4 +878,53 @@ func extractTemplateId(content string) string {
 		}
 	}
 	return ""
+}
+
+
+// ValidatePocTemplate 验证POC模板是否有效
+// 使用Nuclei SDK加载模板，检查是否能正确解析
+func ValidatePocTemplate(content string) error {
+	if content == "" {
+		return fmt.Errorf("POC内容不能为空")
+	}
+
+	// 创建临时文件
+	tempDir, err := os.MkdirTemp("", "nuclei-validate-*")
+	if err != nil {
+		return fmt.Errorf("创建临时目录失败: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	templatePath := filepath.Join(tempDir, "template.yaml")
+	if err := os.WriteFile(templatePath, []byte(content), 0644); err != nil {
+		return fmt.Errorf("写入临时文件失败: %v", err)
+	}
+
+	// 创建Nuclei引擎验证模板
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ne, err := nuclei.NewNucleiEngineCtx(ctx,
+		nuclei.WithTemplatesOrWorkflows(nuclei.TemplateSources{
+			Templates: []string{templatePath},
+		}),
+		nuclei.DisableUpdateCheck(),
+	)
+	if err != nil {
+		return fmt.Errorf("POC格式错误: %v", err)
+	}
+	defer ne.Close()
+
+	// 尝试加载模板
+	if err := ne.LoadAllTemplates(); err != nil {
+		return fmt.Errorf("POC加载失败: %v", err)
+	}
+
+	// 检查是否成功加载了模板
+	templates := ne.GetTemplates()
+	if len(templates) == 0 {
+		return fmt.Errorf("POC无效: 未能加载任何模板，请检查YAML格式和必填字段(id, info, requests等)")
+	}
+
+	return nil
 }

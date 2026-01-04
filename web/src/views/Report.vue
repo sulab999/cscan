@@ -327,7 +327,7 @@ function getHttpStatusType(status) {
 }
 
 function getSeverityType(severity) {
-  const map = { critical: 'danger', high: 'danger', medium: 'warning', low: 'info', info: '' }
+  const map = { critical: 'danger', high: 'danger', medium: 'warning', low: 'info', info: '', unknown: 'info' }
   return map[severity?.toLowerCase()] || 'info'
 }
 

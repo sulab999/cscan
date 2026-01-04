@@ -35,9 +35,9 @@ func (l *GetPocValidationResultLogic) GetPocValidationResult(in *pb.GetPocValida
 		}, nil
 	}
 
-	// 从Redis获取验证结果（与Worker保存的key一致）
-	resultKey := "cscan:task:result:" + taskId
-	resultData, err := l.svcCtx.RedisClient.Get(l.ctx, resultKey).Result()
+	// 从Redis获取任务状态（与UpdateTask保存的key一致）
+	statusKey := "cscan:task:status:" + taskId
+	statusData, err := l.svcCtx.RedisClient.Get(l.ctx, statusKey).Result()
 	if err != nil {
 		// 检查任务是否还在执行中
 		taskInfoKey := "cscan:task:info:" + taskId
@@ -64,53 +64,66 @@ func (l *GetPocValidationResultLogic) GetPocValidationResult(in *pb.GetPocValida
 		}, nil
 	}
 
-	// 解析结果数据
-	var result map[string]interface{}
-	if err := json.Unmarshal([]byte(resultData), &result); err != nil {
+	// 解析状态数据
+	var statusInfo map[string]interface{}
+	if err := json.Unmarshal([]byte(statusData), &statusInfo); err != nil {
 		return &pb.GetPocValidationResultResp{
 			Success: false,
-			Message: "解析结果失败",
+			Message: "解析状态失败",
 			Status:  "ERROR",
 		}, nil
 	}
 
 	// 获取状态
-	status, _ := result["status"].(string)
-	if status == "" {
-		status = "COMPLETED"
+	state, _ := statusInfo["state"].(string)
+	if state == "" {
+		state = "RUNNING"
 	}
 
-	// 解析验证结果列表
+	// 将内部状态映射到前端期望的状态
+	status := state
+	if state == "COMPLETED" {
+		status = "SUCCESS"
+	}
+
+	// 解析结果数据（result字段包含JSON格式的验证结果）
 	var pbResults []*pb.PocValidationResult
-	if results, ok := result["results"].([]interface{}); ok {
-		for _, r := range results {
-			if rMap, ok := r.(map[string]interface{}); ok {
-				pbResult := &pb.PocValidationResult{
-					PocId:      getString(rMap, "pocId"),
-					PocName:    getString(rMap, "pocName"),
-					TemplateId: getString(rMap, "templateId"),
-					Severity:   getString(rMap, "severity"),
-					Matched:    getBool(rMap, "matched"),
-					MatchedUrl: getString(rMap, "matchedUrl"),
-					Details:    getString(rMap, "details"),
-					Output:     getString(rMap, "output"),
-					PocType:    getString(rMap, "pocType"),
-				}
-				if tags, ok := rMap["tags"].([]interface{}); ok {
-					for _, t := range tags {
-						if s, ok := t.(string); ok {
-							pbResult.Tags = append(pbResult.Tags, s)
+	resultStr, _ := statusInfo["result"].(string)
+	if resultStr != "" {
+		var resultData map[string]interface{}
+		if json.Unmarshal([]byte(resultStr), &resultData) == nil {
+			// 从result中获取实际状态（如果有）
+			if resultStatus, ok := resultData["status"].(string); ok && resultStatus != "" {
+				status = resultStatus
+			}
+			// 解析验证结果列表
+			if results, ok := resultData["results"].([]interface{}); ok {
+				for _, r := range results {
+					if rMap, ok := r.(map[string]interface{}); ok {
+						pbResult := &pb.PocValidationResult{
+							PocId:      getString(rMap, "pocId"),
+							PocName:    getString(rMap, "pocName"),
+							TemplateId: getString(rMap, "templateId"),
+							Severity:   getString(rMap, "severity"),
+							Matched:    getBool(rMap, "matched"),
+							MatchedUrl: getString(rMap, "matchedUrl"),
+							Details:    getString(rMap, "details"),
+							Output:     getString(rMap, "output"),
+							PocType:    getString(rMap, "pocType"),
 						}
+						if tags, ok := rMap["tags"].([]interface{}); ok {
+							for _, t := range tags {
+								if s, ok := t.(string); ok {
+									pbResult.Tags = append(pbResult.Tags, s)
+								}
+							}
+						}
+						pbResults = append(pbResults, pbResult)
 					}
 				}
-				pbResults = append(pbResults, pbResult)
 			}
 		}
 	}
-
-	// 获取更新时间
-	updateTime, _ := result["updateTime"].(string)
-	createTime, _ := result["createTime"].(string)
 
 	return &pb.GetPocValidationResultResp{
 		Success:        true,
@@ -119,8 +132,6 @@ func (l *GetPocValidationResultLogic) GetPocValidationResult(in *pb.GetPocValida
 		Results:        pbResults,
 		CompletedCount: int32(len(pbResults)),
 		TotalCount:     int32(len(pbResults)),
-		UpdateTime:     updateTime,
-		CreateTime:     createTime,
 	}, nil
 }
 

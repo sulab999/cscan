@@ -39,6 +39,8 @@ type (
 	HttpServiceMappingDocument = pb.HttpServiceMappingDocument
 	IPV4                       = pb.IPV4
 	IPV6                       = pb.IPV6
+	IncrSubTaskDoneReq         = pb.IncrSubTaskDoneReq
+	IncrSubTaskDoneResp        = pb.IncrSubTaskDoneResp
 	KeepAliveReq               = pb.KeepAliveReq
 	KeepAliveResp              = pb.KeepAliveResp
 	MatchedFingerprintInfo     = pb.MatchedFingerprintInfo
@@ -97,6 +99,8 @@ type (
 		GetHttpServiceMappings(ctx context.Context, in *GetHttpServiceMappingsReq, opts ...grpc.CallOption) (*GetHttpServiceMappingsResp, error)
 		// 获取Subfinder数据源配置
 		GetSubfinderProviders(ctx context.Context, in *GetSubfinderProvidersReq, opts ...grpc.CallOption) (*GetSubfinderProvidersResp, error)
+		// 递增子任务完成数（模块级别）
+		IncrSubTaskDone(ctx context.Context, in *IncrSubTaskDoneReq, opts ...grpc.CallOption) (*IncrSubTaskDoneResp, error)
 	}
 
 	defaultTaskService struct {
@@ -216,4 +220,10 @@ func (m *defaultTaskService) GetHttpServiceMappings(ctx context.Context, in *Get
 func (m *defaultTaskService) GetSubfinderProviders(ctx context.Context, in *GetSubfinderProvidersReq, opts ...grpc.CallOption) (*GetSubfinderProvidersResp, error) {
 	client := pb.NewTaskServiceClient(m.cli.Conn())
 	return client.GetSubfinderProviders(ctx, in, opts...)
+}
+
+// 递增子任务完成数（模块级别）
+func (m *defaultTaskService) IncrSubTaskDone(ctx context.Context, in *IncrSubTaskDoneReq, opts ...grpc.CallOption) (*IncrSubTaskDoneResp, error) {
+	client := pb.NewTaskServiceClient(m.cli.Conn())
+	return client.IncrSubTaskDone(ctx, in, opts...)
 }

@@ -63,7 +63,7 @@ type Asset struct {
 
 	// 新增字段 - 风险评分
 	RiskScore float64 `bson:"risk_score,omitempty" json:"riskScore,omitempty"` // 0-100
-	RiskLevel string  `bson:"risk_level,omitempty" json:"riskLevel,omitempty"` // critical/high/medium/low/info
+	RiskLevel string  `bson:"risk_level,omitempty" json:"riskLevel,omitempty"` // critical/high/medium/low/info/unknown
 }
 
 type AssetModel struct {
@@ -110,14 +110,20 @@ func (m *AssetModel) FindById(ctx context.Context, id string) (*Asset, error) {
 	}
 	var doc Asset
 	err = m.coll.FindOne(ctx, bson.M{"_id": oid}).Decode(&doc)
-	return &doc, err
+	if err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
 func (m *AssetModel) FindByAuthority(ctx context.Context, authority, taskId string) (*Asset, error) {
 	var doc Asset
 	filter := bson.M{"authority": authority, "taskId": taskId}
 	err := m.coll.FindOne(ctx, filter).Decode(&doc)
-	return &doc, err
+	if err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
 // FindByAuthorityOnly 只按authority查找资产（不限制taskId）
@@ -125,14 +131,20 @@ func (m *AssetModel) FindByAuthorityOnly(ctx context.Context, authority string) 
 	var doc Asset
 	filter := bson.M{"authority": authority}
 	err := m.coll.FindOne(ctx, filter).Decode(&doc)
-	return &doc, err
+	if err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
 func (m *AssetModel) FindByHostPort(ctx context.Context, host string, port int) (*Asset, error) {
 	var doc Asset
 	filter := bson.M{"host": host, "port": port}
 	err := m.coll.FindOne(ctx, filter).Decode(&doc)
-	return &doc, err
+	if err != nil {
+		return nil, err
+	}
+	return &doc, nil
 }
 
 func (m *AssetModel) Find(ctx context.Context, filter bson.M, page, pageSize int) ([]Asset, error) {
@@ -272,6 +284,15 @@ func (m *AssetModel) BatchDelete(ctx context.Context, ids []string) (int64, erro
 		return 0, nil
 	}
 	result, err := m.coll.DeleteMany(ctx, bson.M{"_id": bson.M{"$in": oids}})
+	if err != nil {
+		return 0, err
+	}
+	return result.DeletedCount, nil
+}
+
+// DeleteByFilter 根据条件删除资产
+func (m *AssetModel) DeleteByFilter(ctx context.Context, filter bson.M) (int64, error) {
+	result, err := m.coll.DeleteMany(ctx, filter)
 	if err != nil {
 		return 0, err
 	}

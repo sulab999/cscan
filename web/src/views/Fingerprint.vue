@@ -112,7 +112,18 @@
               <span style="color: #909399; font-size: 13px; margin-left: 10px">
                 共 {{ customPagination.total || 0 }} 条规则
               </span>
-              <div style="margin-left: auto">
+              <div style="margin-left: auto; display: flex; gap: 8px;">
+                <el-dropdown @command="handleBatchEnabledCommand">
+                  <el-button type="info" size="small" :loading="batchEnabledLoading">
+                    <el-icon><Operation /></el-icon>批量操作<el-icon class="el-icon--right"><arrow-down /></el-icon>
+                  </el-button>
+                  <template #dropdown>
+                    <el-dropdown-menu>
+                      <el-dropdown-item command="enableAll">全部启用</el-dropdown-item>
+                      <el-dropdown-item command="disableAll">全部禁用</el-dropdown-item>
+                    </el-dropdown-menu>
+                  </template>
+                </el-dropdown>
                 <el-button type="danger" size="small" @click="handleClearCustomFingerprints">
                   <el-icon><Delete /></el-icon>清空
                 </el-button>
@@ -723,11 +734,14 @@
 <script setup>
 import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, ArrowDown, Delete, Upload, Search, Download } from '@element-plus/icons-vue'
-import { getFingerprintList, saveFingerprint, deleteFingerprint, getFingerprintCategories, syncFingerprints, updateFingerprintEnabled, importFingerprints, clearCustomFingerprints, validateFingerprint as validateFingerprintApi, batchValidateFingerprints, matchFingerprintAssets, getHttpServiceMappingList, saveHttpServiceMapping, deleteHttpServiceMapping } from '@/api/fingerprint'
+import { Plus, Refresh, ArrowDown, Delete, Upload, Search, Download, Operation } from '@element-plus/icons-vue'
+import { getFingerprintList, saveFingerprint, deleteFingerprint, getFingerprintCategories, syncFingerprints, updateFingerprintEnabled, batchUpdateFingerprintEnabled, importFingerprints, clearCustomFingerprints, validateFingerprint as validateFingerprintApi, batchValidateFingerprints, matchFingerprintAssets, getHttpServiceMappingList, saveHttpServiceMapping, deleteHttpServiceMapping } from '@/api/fingerprint'
 import { saveAs } from 'file-saver'
 
 const activeTab = ref('builtin')
+
+// 批量操作
+const batchEnabledLoading = ref(false)
 
 // 内置指纹
 const builtinFingerprints = ref([])
@@ -929,6 +943,42 @@ function resetCustomFilter() {
   customFilter.enabled = null
   customPagination.page = 1
   loadCustomFingerprints()
+}
+
+// 批量更新启用状态
+async function handleBatchEnabledCommand(command) {
+  const enabled = command === 'enableAll'
+  const action = enabled ? '启用' : '禁用'
+  
+  try {
+    await ElMessageBox.confirm(
+      `确定要${action}全部自定义指纹吗？`,
+      '批量操作',
+      { type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  
+  batchEnabledLoading.value = true
+  try {
+    const res = await batchUpdateFingerprintEnabled({
+      ids: [],  // 空数组，使用 all 参数
+      all: true,
+      enabled: enabled
+    })
+    if (res.code === 0) {
+      ElMessage.success(res.msg)
+      loadCustomFingerprints()
+      loadCategories()
+    } else {
+      ElMessage.error(res.msg)
+    }
+  } catch (err) {
+    ElMessage.error('操作失败: ' + (err.message || '未知错误'))
+  } finally {
+    batchEnabledLoading.value = false
+  }
 }
 
 // 显示导入对话框

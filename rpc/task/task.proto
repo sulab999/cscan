@@ -42,6 +42,8 @@ service TaskService {
   rpc GetHttpServiceMappings(GetHttpServiceMappingsReq) returns (GetHttpServiceMappingsResp);
   // 获取Subfinder数据源配置
   rpc GetSubfinderProviders(GetSubfinderProvidersReq) returns (GetSubfinderProvidersResp);
+  // 递增子任务完成数（模块级别）
+  rpc IncrSubTaskDone(IncrSubTaskDoneReq) returns (IncrSubTaskDoneResp);
 }
 
 message CheckTaskReq {
@@ -58,6 +60,7 @@ message CheckTaskResp {
   string result = 6;
   string workspaceId = 7;
   string config = 8;
+  string mainTaskId = 9;  // MongoDB ObjectID
 }
 
 message UpdateTaskReq {
@@ -446,4 +449,22 @@ message GetSubfinderProvidersResp {
   string message = 2;
   repeated SubfinderProviderDocument providers = 3;
   int32 count = 4;
+}
+
+
+// 递增子任务完成数请求（模块级别）
+message IncrSubTaskDoneReq {
+  string taskId = 1;        // 子任务ID
+  string mainTaskId = 2;    // 主任务ID (MongoDB ObjectID)
+  string workspaceId = 3;   // 工作空间ID
+  string phase = 4;         // 完成的阶段名称
+}
+
+// 递增子任务完成数响应
+message IncrSubTaskDoneResp {
+  bool success = 1;
+  string message = 2;
+  int32 subTaskDone = 3;    // 当前已完成数
+  int32 subTaskCount = 4;   // 总数
+  bool allDone = 5;         // 是否全部完成
 }

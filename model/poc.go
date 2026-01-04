@@ -27,7 +27,7 @@ type CustomPoc struct {
 	Id          primitive.ObjectID `bson:"_id,omitempty" json:"id"`
 	Name        string             `bson:"name" json:"name"`               // POC名称
 	TemplateId  string             `bson:"template_id" json:"templateId"`  // 模板ID（唯一标识）
-	Severity    string             `bson:"severity" json:"severity"`       // 严重级别: critical/high/medium/low/info
+	Severity    string             `bson:"severity" json:"severity"`       // 严重级别: critical/high/medium/low/info/unknown
 	Tags        []string           `bson:"tags" json:"tags"`               // 标签
 	Author      string             `bson:"author" json:"author"`           // 作者
 	Description string             `bson:"description" json:"description"` // 描述
@@ -331,7 +331,7 @@ type NucleiTemplate struct {
 	TemplateId  string             `bson:"template_id" json:"templateId"`   // 模板ID
 	Name        string             `bson:"name" json:"name"`                // 模板名称
 	Author      string             `bson:"author" json:"author"`            // 作者
-	Severity    string             `bson:"severity" json:"severity"`        // 严重级别
+	Severity    string             `bson:"severity" json:"severity"`        // 严重级别: critical/high/medium/low/info/unknown
 	Description string             `bson:"description" json:"description"`  // 描述
 	Tags        []string           `bson:"tags" json:"tags"`                // 标签
 	Category    string             `bson:"category" json:"category"`        // 分类(目录名)

@@ -46,7 +46,12 @@ func ValidateTargets(target string) []TargetValidationError {
 
 // validateSingleTarget 校验单个目标
 func validateSingleTarget(target string) error {
-	// 去除可能的端口部分进行基础校验
+	// 检查是否是 IPv6 格式
+	if isIPv6Format(target) {
+		return validateIPv6Target(target)
+	}
+
+	// 去除可能的端口部分进行基础校验（仅针对 IPv4 和域名）
 	host := target
 	if idx := strings.LastIndex(target, ":"); idx != -1 {
 		// 检查是否是 host:port 格式
@@ -81,6 +86,72 @@ func validateSingleTarget(target string) error {
 	}
 
 	return fmt.Errorf("无效的目标格式，请输入有效的IP、CIDR、IP范围或域名")
+}
+
+// isIPv6Format 检查是否是 IPv6 格式
+func isIPv6Format(target string) bool {
+	// [IPv6]:port 格式
+	if strings.HasPrefix(target, "[") {
+		return true
+	}
+	// 包含 Zone ID 的 IPv6
+	if strings.Contains(target, "%") {
+		return true
+	}
+	// 统计冒号数量，IPv6 至少有2个冒号
+	colonCount := strings.Count(target, ":")
+	return colonCount >= 2
+}
+
+// validateIPv6Target 校验 IPv6 目标
+func validateIPv6Target(target string) error {
+	ipv6 := target
+
+	// 处理 [IPv6]:port 格式
+	if strings.HasPrefix(target, "[") {
+		closeBracket := strings.Index(target, "]")
+		if closeBracket == -1 {
+			return fmt.Errorf("无效的IPv6格式，缺少闭合括号 ]")
+		}
+		ipv6 = target[1:closeBracket]
+		// 检查端口部分
+		remaining := target[closeBracket+1:]
+		if remaining != "" && !strings.HasPrefix(remaining, ":") {
+			return fmt.Errorf("无效的IPv6格式")
+		}
+		if strings.HasPrefix(remaining, ":") {
+			portStr := remaining[1:]
+			port, err := strconv.Atoi(portStr)
+			if err != nil || port <= 0 || port > 65535 {
+				return fmt.Errorf("无效的端口号: %s", portStr)
+			}
+		}
+	}
+
+	// 去除 Zone ID（如 %eth0 或 %5）
+	if zoneIndex := strings.Index(ipv6, "%"); zoneIndex != -1 {
+		ipv6 = ipv6[:zoneIndex]
+	}
+
+	// 处理 IPv6 CIDR
+	if strings.Contains(ipv6, "/") {
+		parts := strings.Split(ipv6, "/")
+		if len(parts) != 2 {
+			return fmt.Errorf("无效的IPv6 CIDR格式")
+		}
+		mask, err := strconv.Atoi(parts[1])
+		if err != nil || mask < 0 || mask > 128 {
+			return fmt.Errorf("无效的IPv6子网掩码: %s", parts[1])
+		}
+		ipv6 = parts[0]
+	}
+
+	// 使用 Go 标准库验证 IPv6
+	if ip := net.ParseIP(ipv6); ip != nil {
+		return nil
+	}
+
+	return fmt.Errorf("无效的IPv6地址格式")
 }
 
 // validateCIDR 校验 CIDR 格式

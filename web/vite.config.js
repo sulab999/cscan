@@ -22,6 +22,7 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:8888',
         changeOrigin: true,
+        ws: true, // 启用 WebSocket 代理
         // 配置SSE支持
         configure: (proxy, options) => {
           proxy.on('proxyReq', (proxyReq, req, res) => {

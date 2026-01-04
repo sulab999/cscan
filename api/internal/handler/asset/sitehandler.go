@@ -45,3 +45,43 @@ func SiteStatHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 		httpx.OkJson(w, resp)
 	}
 }
+
+// SiteDeleteHandler 删除站点
+func SiteDeleteHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req types.SiteDeleteReq
+		if err := httpx.Parse(r, &req); err != nil {
+			response.ParamError(w, err.Error())
+			return
+		}
+
+		workspaceId := middleware.GetWorkspaceId(r.Context())
+		l := logic.NewSiteLogic(r.Context(), svcCtx)
+		resp, err := l.SiteDelete(&req, workspaceId)
+		if err != nil {
+			response.Error(w, err)
+			return
+		}
+		httpx.OkJson(w, resp)
+	}
+}
+
+// SiteBatchDeleteHandler 批量删除站点
+func SiteBatchDeleteHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req types.SiteBatchDeleteReq
+		if err := httpx.Parse(r, &req); err != nil {
+			response.ParamError(w, err.Error())
+			return
+		}
+
+		workspaceId := middleware.GetWorkspaceId(r.Context())
+		l := logic.NewSiteLogic(r.Context(), svcCtx)
+		resp, err := l.SiteBatchDelete(&req, workspaceId)
+		if err != nil {
+			response.Error(w, err)
+			return
+		}
+		httpx.OkJson(w, resp)
+	}
+}

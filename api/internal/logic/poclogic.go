@@ -9,9 +9,11 @@ import (
 	"cscan/api/internal/types"
 	"cscan/model"
 	"cscan/rpc/task/pb"
+	"cscan/scanner"
 
 	"github.com/zeromicro/go-zero/core/logx"
 	"go.mongodb.org/mongo-driver/bson"
+	"gopkg.in/yaml.v3"
 )
 
 // ==================== 标签映射 ====================
@@ -195,6 +197,13 @@ func NewCustomPocSaveLogic(ctx context.Context, svcCtx *svc.ServiceContext) *Cus
 }
 
 func (l *CustomPocSaveLogic) CustomPocSave(req *types.CustomPocSaveReq) (resp *types.BaseResp, err error) {
+	// 验证POC模板是否有效
+	if req.Content != "" {
+		if err := scanner.ValidatePocTemplate(req.Content); err != nil {
+			return &types.BaseResp{Code: 400, Msg: "POC验证失败: " + err.Error()}, nil
+		}
+	}
+
 	doc := &model.CustomPoc{
 		Name:        req.Name,
 		TemplateId:  req.TemplateId,
@@ -961,4 +970,224 @@ func buildAssetUrl(asset *model.Asset, httpsPorts []int) string {
 	}
 
 	return url
+}
+
+// ==================== Nuclei模板同步（从前端上传） ====================
+
+type NucleiTemplateSyncLogic struct {
+	logx.Logger
+	ctx    context.Context
+	svcCtx *svc.ServiceContext
+}
+
+func NewNucleiTemplateSyncLogic(ctx context.Context, svcCtx *svc.ServiceContext) *NucleiTemplateSyncLogic {
+	return &NucleiTemplateSyncLogic{
+		Logger: logx.WithContext(ctx),
+		ctx:    ctx,
+		svcCtx: svcCtx,
+	}
+}
+
+func (l *NucleiTemplateSyncLogic) SyncFromUpload(req *types.NucleiTemplateSyncReq) (resp *types.NucleiTemplateSyncResp, err error) {
+	if len(req.Templates) == 0 {
+		return &types.NucleiTemplateSyncResp{Code: 400, Msg: "没有模板数据"}, nil
+	}
+
+	successCount := 0
+	errorCount := 0
+
+	for _, item := range req.Templates {
+		if item.Content == "" {
+			errorCount++
+			continue
+		}
+
+		// 解析模板ID
+		templateId := parseTemplateId(item.Content)
+		if templateId == "" {
+			errorCount++
+			continue
+		}
+
+		// 解析模板信息
+		templateInfo, err := parseTemplateContent(item.Content)
+		if err != nil {
+			errorCount++
+			continue
+		}
+
+		// 从路径提取分类
+		category := extractCategoryFromPath(item.Path)
+
+		// 处理Author字段（可能是string或[]interface{}）
+		author := parseAuthor(templateInfo.Author)
+
+		// 构建模板文档
+		doc := &model.NucleiTemplate{
+			TemplateId:  templateId,
+			Name:        templateInfo.Name,
+			Author:      author,
+			Severity:    strings.ToLower(templateInfo.Severity),
+			Description: templateInfo.Description,
+			Tags:        parseTemplateTags(templateInfo.Tags),
+			Category:    category,
+			FilePath:    item.Path,
+			Content:     item.Content,
+			Enabled:     true,
+		}
+
+		// 设置默认severity
+		if doc.Severity == "" {
+			doc.Severity = "unknown"
+		}
+
+		// 提取漏洞知识库信息
+		if templateInfo.Classification != nil {
+			doc.CvssScore = templateInfo.Classification.CvssScore
+			doc.CvssMetrics = templateInfo.Classification.CvssMetrics
+			doc.CveIds = parseCommaSeparated(templateInfo.Classification.CveId)
+			doc.CweIds = parseCommaSeparated(templateInfo.Classification.CweId)
+		}
+		if len(templateInfo.Reference) > 0 {
+			doc.References = templateInfo.Reference
+		}
+		if templateInfo.Remediation != "" {
+			doc.Remediation = templateInfo.Remediation
+		}
+
+		// 保存到数据库（使用upsert）
+		err = l.svcCtx.NucleiTemplateModel.Upsert(l.ctx, doc)
+		if err != nil {
+			errorCount++
+			continue
+		}
+		successCount++
+	}
+
+	return &types.NucleiTemplateSyncResp{
+		Code:         0,
+		Msg:          fmt.Sprintf("导入完成，成功: %d, 失败: %d", successCount, errorCount),
+		SuccessCount: successCount,
+		ErrorCount:   errorCount,
+	}, nil
+}
+
+// extractCategoryFromPath 从路径提取分类
+func extractCategoryFromPath(path string) string {
+	// 路径格式: nuclei-templates/http/cves/2021/CVE-2021-xxxx.yaml
+	// 或: http/cves/2021/CVE-2021-xxxx.yaml
+	parts := strings.Split(path, "/")
+	if len(parts) < 2 {
+		return "other"
+	}
+
+	// 跳过 nuclei-templates 前缀
+	startIdx := 0
+	for i, part := range parts {
+		if part == "nuclei-templates" {
+			startIdx = i + 1
+			break
+		}
+	}
+
+	if startIdx < len(parts) {
+		return parts[startIdx]
+	}
+	return parts[0]
+}
+
+// parseTemplateId 从模板内容解析ID
+func parseTemplateId(content string) string {
+	for _, line := range strings.Split(content, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "id:") {
+			return strings.TrimSpace(strings.TrimPrefix(line, "id:"))
+		}
+	}
+	return ""
+}
+
+// parseTemplateContent 解析模板内容
+func parseTemplateContent(content string) (*templateInfoWrapper, error) {
+	var wrapper struct {
+		Id   string              `yaml:"id"`
+		Info *templateInfoWrapper `yaml:"info"`
+	}
+	if err := yaml.Unmarshal([]byte(content), &wrapper); err != nil {
+		return nil, err
+	}
+	if wrapper.Info == nil {
+		return &templateInfoWrapper{}, nil
+	}
+	return wrapper.Info, nil
+}
+
+// templateInfoWrapper 模板信息包装
+type templateInfoWrapper struct {
+	Name           string                     `yaml:"name"`
+	Author         interface{}                `yaml:"author"` // 可能是string或[]string
+	Severity       string                     `yaml:"severity"`
+	Description    string                     `yaml:"description"`
+	Reference      []string                   `yaml:"reference"`
+	Remediation    string                     `yaml:"remediation"`
+	Classification *templateClassification    `yaml:"classification"`
+	Tags           string                     `yaml:"tags"`
+}
+
+type templateClassification struct {
+	CvssMetrics string  `yaml:"cvss-metrics"`
+	CvssScore   float64 `yaml:"cvss-score"`
+	CveId       string  `yaml:"cve-id"`
+	CweId       string  `yaml:"cwe-id"`
+}
+
+// parseTemplateTags 解析标签
+func parseTemplateTags(tags string) []string {
+	if tags == "" {
+		return nil
+	}
+	var result []string
+	for _, tag := range strings.Split(tags, ",") {
+		tag = strings.TrimSpace(tag)
+		if tag != "" {
+			result = append(result, tag)
+		}
+	}
+	return result
+}
+
+// parseCommaSeparated 解析逗号分隔的字符串
+func parseCommaSeparated(s string) []string {
+	if s == "" {
+		return nil
+	}
+	var result []string
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			result = append(result, part)
+		}
+	}
+	return result
+}
+
+// parseAuthor 解析作者字段（可能是string或[]interface{}）
+func parseAuthor(author interface{}) string {
+	if author == nil {
+		return ""
+	}
+	switch v := author.(type) {
+	case string:
+		return v
+	case []interface{}:
+		var authors []string
+		for _, a := range v {
+			if s, ok := a.(string); ok {
+				authors = append(authors, s)
+			}
+		}
+		return strings.Join(authors, ", ")
+	default:
+		return fmt.Sprintf("%v", author)
+	}
 }

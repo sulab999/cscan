@@ -29,17 +29,17 @@ func NewKeepAliveLogic(ctx context.Context, svcCtx *svc.ServiceContext) *KeepAli
 func (l *KeepAliveLogic) KeepAlive(in *pb.KeepAliveReq) (*pb.KeepAliveResp, error) {
 	workerName := in.WorkerName
 
-	// 更新Worker状态到Redis
+	// 更新Worker状态到Redis（字段名与 API WorkerList 保持一致）
 	workerKey := "cscan:worker:" + workerName
 	workerData := map[string]interface{}{
-		"name":               workerName,
+		"workerName":         workerName,
 		"ip":                 in.Ip,
 		"cpuLoad":            in.CpuLoad,
 		"memUsed":            in.MemUsed,
 		"taskStartedNumber":  in.TaskStartedNumber,
 		"taskExecutedNumber": in.TaskExecutedNumber,
 		"isDaemon":           in.IsDaemon,
-		"lastHeartbeat":      time.Now().Unix(),
+		"updateTime":         time.Now().Format("2006-01-02 15:04:05"),
 		"status":             "online",
 	}
 	workerJson, _ := json.Marshal(workerData)

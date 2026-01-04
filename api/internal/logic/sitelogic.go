@@ -3,6 +3,7 @@ package logic
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	"cscan/api/internal/logic/common"
 	"cscan/api/internal/svc"
@@ -139,6 +140,50 @@ func (l *SiteLogic) SiteList(req *types.SiteListReq, workspaceId string) (*types
 	resp.Total = totalCount
 	resp.List = allSites
 	return resp, nil
+}
+
+// SiteDelete 删除站点（实际删除对应的资产）
+func (l *SiteLogic) SiteDelete(req *types.SiteDeleteReq, workspaceId string) (*types.BaseResp, error) {
+	workspaceIds := common.GetWorkspaceIds(l.ctx, l.svcCtx, workspaceId)
+
+	for _, wsId := range workspaceIds {
+		assetModel := model.NewAssetModel(l.svcCtx.MongoDB, wsId)
+		// 先检查资产是否存在
+		asset, err := assetModel.FindById(l.ctx, req.Id)
+		if err != nil {
+			continue
+		}
+		if asset != nil {
+			err = assetModel.Delete(l.ctx, req.Id)
+			if err == nil {
+				return &types.BaseResp{Code: 0, Msg: "删除成功"}, nil
+			}
+		}
+	}
+
+	return &types.BaseResp{Code: 500, Msg: "删除失败，资产不存在"}, nil
+}
+
+// SiteBatchDelete 批量删除站点
+func (l *SiteLogic) SiteBatchDelete(req *types.SiteBatchDeleteReq, workspaceId string) (*types.BaseResp, error) {
+	if len(req.Ids) == 0 {
+		return &types.BaseResp{Code: 400, Msg: "请选择要删除的站点"}, nil
+	}
+
+	workspaceIds := common.GetWorkspaceIds(l.ctx, l.svcCtx, workspaceId)
+	var totalDeleted int64
+
+	for _, wsId := range workspaceIds {
+		assetModel := model.NewAssetModel(l.svcCtx.MongoDB, wsId)
+		deleted, _ := assetModel.BatchDelete(l.ctx, req.Ids)
+		totalDeleted += deleted
+	}
+
+	if totalDeleted == 0 {
+		return &types.BaseResp{Code: 500, Msg: "删除失败，未找到匹配的站点"}, nil
+	}
+
+	return &types.BaseResp{Code: 0, Msg: "成功删除 " + strconv.Itoa(int(totalDeleted)) + " 个站点"}, nil
 }
 
 // SiteStat 站点统计

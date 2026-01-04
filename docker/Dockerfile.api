@@ -5,17 +5,19 @@ FROM golang:1.24-alpine AS builder
 WORKDIR /app
 
 # 安装依赖
-RUN apk add --no-cache git
+RUN apk add --no-cache git libpcap-dev gcc musl-dev
 
 # 复制 go.mod 和 go.sum
 COPY go.mod go.sum ./
+ENV GOTOOLCHAIN=auto
 RUN go mod download
 
 # 复制源代码
 COPY . .
 
-# 编译 API 服务 - 仅支持 amd64
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o /cscan-api ./api/cscan.go
+# 编译 API 服务 - 自动适配当前架构
+ARG TARGETARCH
+RUN CGO_ENABLED=1 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /cscan-api ./api/cscan.go
 
 # 运行镜像
 FROM alpine:3.18
@@ -23,17 +25,13 @@ FROM alpine:3.18
 WORKDIR /app
 
 # 安装证书和依赖
-RUN apk add --no-cache ca-certificates tzdata unzip
+RUN apk add --no-cache ca-certificates tzdata unzip libpcap
 
-# 安装 nuclei (仅 amd64)
-COPY poc/nuclei_3.6.1_linux_amd64.zip /tmp/nuclei.zip
-RUN unzip /tmp/nuclei.zip -d /tmp/ \
-    && find /tmp -name "nuclei" -type f -exec mv {} /usr/local/bin/ \; \
-    && rm -rf /tmp/nuclei* \
-    && chmod +x /usr/local/bin/nuclei
+# 复制 poc 目录
+COPY poc/ ./poc/
 
-# 更新 nuclei 模板
-RUN nuclei -update-templates -v || true
+# 复制 bin 目录
+COPY bin/ ./bin/
 
 # 设置时区
 ENV TZ=Asia/Shanghai

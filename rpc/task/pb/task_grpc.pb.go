@@ -2,7 +2,7 @@
 // versions:
 // - protoc-gen-go-grpc v1.6.0
 // - protoc             v3.19.4
-// source: rpc/task/task.proto
+// source: task.proto
 
 package pb
 
@@ -37,6 +37,7 @@ const (
 	TaskService_GetTemplatesByIds_FullMethodName      = "/task.TaskService/GetTemplatesByIds"
 	TaskService_GetHttpServiceMappings_FullMethodName = "/task.TaskService/GetHttpServiceMappings"
 	TaskService_GetSubfinderProviders_FullMethodName  = "/task.TaskService/GetSubfinderProviders"
+	TaskService_IncrSubTaskDone_FullMethodName        = "/task.TaskService/IncrSubTaskDone"
 )
 
 // TaskServiceClient is the client API for TaskService service.
@@ -81,6 +82,8 @@ type TaskServiceClient interface {
 	GetHttpServiceMappings(ctx context.Context, in *GetHttpServiceMappingsReq, opts ...grpc.CallOption) (*GetHttpServiceMappingsResp, error)
 	// 获取Subfinder数据源配置
 	GetSubfinderProviders(ctx context.Context, in *GetSubfinderProvidersReq, opts ...grpc.CallOption) (*GetSubfinderProvidersResp, error)
+	// 递增子任务完成数（模块级别）
+	IncrSubTaskDone(ctx context.Context, in *IncrSubTaskDoneReq, opts ...grpc.CallOption) (*IncrSubTaskDoneResp, error)
 }
 
 type taskServiceClient struct {
@@ -271,6 +274,16 @@ func (c *taskServiceClient) GetSubfinderProviders(ctx context.Context, in *GetSu
 	return out, nil
 }
 
+func (c *taskServiceClient) IncrSubTaskDone(ctx context.Context, in *IncrSubTaskDoneReq, opts ...grpc.CallOption) (*IncrSubTaskDoneResp, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(IncrSubTaskDoneResp)
+	err := c.cc.Invoke(ctx, TaskService_IncrSubTaskDone_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // TaskServiceServer is the server API for TaskService service.
 // All implementations must embed UnimplementedTaskServiceServer
 // for forward compatibility.
@@ -313,6 +326,8 @@ type TaskServiceServer interface {
 	GetHttpServiceMappings(context.Context, *GetHttpServiceMappingsReq) (*GetHttpServiceMappingsResp, error)
 	// 获取Subfinder数据源配置
 	GetSubfinderProviders(context.Context, *GetSubfinderProvidersReq) (*GetSubfinderProvidersResp, error)
+	// 递增子任务完成数（模块级别）
+	IncrSubTaskDone(context.Context, *IncrSubTaskDoneReq) (*IncrSubTaskDoneResp, error)
 	mustEmbedUnimplementedTaskServiceServer()
 }
 
@@ -376,6 +391,9 @@ func (UnimplementedTaskServiceServer) GetHttpServiceMappings(context.Context, *G
 }
 func (UnimplementedTaskServiceServer) GetSubfinderProviders(context.Context, *GetSubfinderProvidersReq) (*GetSubfinderProvidersResp, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSubfinderProviders not implemented")
+}
+func (UnimplementedTaskServiceServer) IncrSubTaskDone(context.Context, *IncrSubTaskDoneReq) (*IncrSubTaskDoneResp, error) {
+	return nil, status.Error(codes.Unimplemented, "method IncrSubTaskDone not implemented")
 }
 func (UnimplementedTaskServiceServer) mustEmbedUnimplementedTaskServiceServer() {}
 func (UnimplementedTaskServiceServer) testEmbeddedByValue()                     {}
@@ -722,6 +740,24 @@ func _TaskService_GetSubfinderProviders_Handler(srv interface{}, ctx context.Con
 	return interceptor(ctx, in, info, handler)
 }
 
+func _TaskService_IncrSubTaskDone_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(IncrSubTaskDoneReq)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(TaskServiceServer).IncrSubTaskDone(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: TaskService_IncrSubTaskDone_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(TaskServiceServer).IncrSubTaskDone(ctx, req.(*IncrSubTaskDoneReq))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // TaskService_ServiceDesc is the grpc.ServiceDesc for TaskService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -801,7 +837,11 @@ var TaskService_ServiceDesc = grpc.ServiceDesc{
 			MethodName: "GetSubfinderProviders",
 			Handler:    _TaskService_GetSubfinderProviders_Handler,
 		},
+		{
+			MethodName: "IncrSubTaskDone",
+			Handler:    _TaskService_IncrSubTaskDone_Handler,
+		},
 	},
 	Streams:  []grpc.StreamDesc{},
-	Metadata: "rpc/task/task.proto",
+	Metadata: "task.proto",
 }

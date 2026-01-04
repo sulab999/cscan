@@ -3,6 +3,7 @@ package handler
 import (
 	"net/http"
 
+	"cscan/api/internal/handler/ai"
 	"cscan/api/internal/handler/asset"
 	"cscan/api/internal/handler/fingerprint"
 	"cscan/api/internal/handler/onlineapi"
@@ -21,13 +22,59 @@ import (
 	"github.com/zeromicro/go-zero/rest"
 )
 
+// WorkerWSHandlerInstance 全局WebSocket处理器实例
+var WorkerWSHandlerInstance *worker.WorkerWSHandler
+
 func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
-	// 公开路由（无需认证）- 只保留登录接口
+	// 初始化WebSocket处理器
+	WorkerWSHandlerInstance = worker.NewWorkerWSHandler(svcCtx)
+
+	// 初始化审计服务
+	worker.InitAuditService(svcCtx)
+
+	// 公开路由（无需认证）- 登录接口和Worker安装相关
 	server.AddRoutes(
 		[]rest.Route{
 			{Method: http.MethodPost, Path: "/api/v1/login", Handler: user.LoginHandler(svcCtx)},
+			// Worker安装相关（无需认证，Worker需要调用）
+			{Method: http.MethodGet, Path: "/api/v1/worker/download", Handler: worker.WorkerDownloadHandler(svcCtx)},
+			{Method: http.MethodPost, Path: "/api/v1/worker/validate", Handler: worker.WorkerValidateKeyHandler(svcCtx)},
+			// Worker WebSocket端点（认证在WebSocket握手后进行）
+			{Method: http.MethodGet, Path: "/api/v1/worker/ws", Handler: worker.WorkerWSEndpointHandler(svcCtx, WorkerWSHandlerInstance)},
 		},
 	)
+
+	// Worker专用路由（需要Install Key认证）
+	workerAuthMiddleware := middleware.NewWorkerAuthMiddleware(svcCtx.RedisClient)
+	workerRoutes := []rest.Route{
+		// 任务相关
+		{Method: http.MethodPost, Path: "/api/v1/worker/task/check", Handler: worker.WorkerTaskCheckHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/task/update", Handler: worker.WorkerTaskUpdateHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/task/result", Handler: worker.WorkerTaskResultHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/task/vul", Handler: worker.WorkerVulResultHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/task/subtask/done", Handler: worker.WorkerSubTaskDoneHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/task/control", Handler: worker.WorkerTaskControlHandler(svcCtx)},
+		// 心跳
+		{Method: http.MethodPost, Path: "/api/v1/worker/heartbeat", Handler: worker.WorkerHeartbeatHandler(svcCtx)},
+		// Worker离线通知
+		{Method: http.MethodPost, Path: "/api/v1/worker/offline", Handler: worker.WorkerOfflineHandler(svcCtx)},
+		// 配置获取
+		{Method: http.MethodPost, Path: "/api/v1/worker/config/templates", Handler: worker.WorkerConfigTemplatesHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/config/fingerprints", Handler: worker.WorkerConfigFingerprintsHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/config/subfinder", Handler: worker.WorkerConfigSubfinderHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/config/httpservice", Handler: worker.WorkerConfigHttpServiceHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/config/poc", Handler: worker.WorkerConfigPocHandler(svcCtx)},
+	}
+
+	// 为Worker路由包装认证中间件
+	for i := range workerRoutes {
+		originalHandler := workerRoutes[i].Handler
+		workerRoutes[i].Handler = func(w http.ResponseWriter, r *http.Request) {
+			workerAuthMiddleware.Handle(http.HandlerFunc(originalHandler)).ServeHTTP(w, r)
+		}
+	}
+
+	server.AddRoutes(workerRoutes)
 
 	// 需要认证的路由
 	authMiddleware := middleware.NewAuthMiddleware(svcCtx.Config.Auth.AccessSecret)
@@ -64,10 +111,13 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 		{Method: http.MethodPost, Path: "/api/v1/asset/batchDelete", Handler: asset.AssetBatchDeleteHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/asset/clear", Handler: asset.AssetClearHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/asset/history", Handler: asset.AssetHistoryHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/asset/import", Handler: asset.AssetImportHandler(svcCtx)},
 
 		// 站点管理
 		{Method: http.MethodPost, Path: "/api/v1/asset/site/list", Handler: asset.SiteListHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/asset/site/stat", Handler: asset.SiteStatHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/asset/site/delete", Handler: asset.SiteDeleteHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/asset/site/batchDelete", Handler: asset.SiteBatchDeleteHandler(svcCtx)},
 
 		// 域名管理
 		{Method: http.MethodPost, Path: "/api/v1/asset/domain/list", Handler: asset.DomainListHandler(svcCtx)},
@@ -113,6 +163,9 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 		{Method: http.MethodPost, Path: "/api/v1/worker/rename", Handler: worker.WorkerRenameHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/worker/restart", Handler: worker.WorkerRestartHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/worker/concurrency", Handler: worker.WorkerSetConcurrencyHandler(svcCtx)},
+		// Worker安装管理（需要认证）
+		{Method: http.MethodPost, Path: "/api/v1/worker/install/command", Handler: worker.WorkerInstallCommandHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/install/refresh", Handler: worker.WorkerRefreshKeyHandler(svcCtx)},
 
 		// 在线API搜索
 		{Method: http.MethodPost, Path: "/api/v1/onlineapi/search", Handler: onlineapi.OnlineSearchHandler(svcCtx)},
@@ -138,6 +191,7 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 		{Method: http.MethodPost, Path: "/api/v1/poc/nuclei/templates", Handler: poc.NucleiTemplateListHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/poc/nuclei/categories", Handler: poc.NucleiTemplateCategoriesHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/poc/nuclei/sync", Handler: poc.NucleiTemplateSyncHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/poc/nuclei/clear", Handler: poc.NucleiTemplateClearHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/poc/nuclei/updateEnabled", Handler: poc.NucleiTemplateUpdateEnabledHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/poc/nuclei/detail", Handler: poc.NucleiTemplateDetailHandler(svcCtx)},
 
@@ -148,6 +202,7 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 		{Method: http.MethodPost, Path: "/api/v1/fingerprint/categories", Handler: fingerprint.FingerprintCategoriesHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/fingerprint/sync", Handler: fingerprint.FingerprintSyncHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/fingerprint/updateEnabled", Handler: fingerprint.FingerprintUpdateEnabledHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/fingerprint/batchUpdateEnabled", Handler: fingerprint.FingerprintBatchUpdateEnabledHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/fingerprint/import", Handler: fingerprint.FingerprintImportHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/fingerprint/importFromFile", Handler: fingerprint.FingerprintImportFromFileHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/fingerprint/clearCustom", Handler: fingerprint.FingerprintClearCustomHandler(svcCtx)},
@@ -157,6 +212,7 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 
 		// POC验证
 		{Method: http.MethodPost, Path: "/api/v1/poc/custom/validate", Handler: poc.PocValidateHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/poc/custom/validateSyntax", Handler: poc.ValidatePocSyntaxHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/poc/batchValidate", Handler: poc.PocBatchValidateHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/poc/queryResult", Handler: poc.PocValidationResultQueryHandler(svcCtx)},
 
@@ -173,6 +229,11 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 		{Method: http.MethodPost, Path: "/api/v1/subfinder/provider/list", Handler: subfinder.SubfinderProviderListHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/subfinder/provider/save", Handler: subfinder.SubfinderProviderSaveHandler(svcCtx)},
 		{Method: http.MethodPost, Path: "/api/v1/subfinder/provider/info", Handler: subfinder.SubfinderProviderInfoHandler(svcCtx)},
+
+		// AI辅助
+		{Method: http.MethodPost, Path: "/api/v1/ai/generatePoc", Handler: ai.GeneratePocHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/ai/config/get", Handler: ai.AIConfigGetHandler(svcCtx)},
+		{Method: http.MethodPost, Path: "/api/v1/ai/config/save", Handler: ai.AIConfigSaveHandler(svcCtx)},
 	}
 
 	// 为每个路由包装认证中间件
@@ -203,4 +264,44 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 	}
 
 	server.AddRoutes(adminRoutes)
+
+	// Worker控制台路由（需要认证 + 管理员权限）
+	consoleAuthMiddleware := middleware.NewConsoleAuthMiddleware(svcCtx.RedisClient)
+	consoleRoutes := []rest.Route{
+		// Worker控制台信息
+		{Method: http.MethodGet, Path: "/api/v1/worker/console/info", Handler: worker.WorkerConsoleInfoHandler(svcCtx, WorkerWSHandlerInstance)},
+		// Worker文件管理
+		{Method: http.MethodGet, Path: "/api/v1/worker/console/files", Handler: worker.WorkerFileListHandler(svcCtx, WorkerWSHandlerInstance)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/console/files/upload", Handler: worker.WorkerFileUploadHandler(svcCtx, WorkerWSHandlerInstance)},
+		{Method: http.MethodGet, Path: "/api/v1/worker/console/files/download", Handler: worker.WorkerFileDownloadHandler(svcCtx, WorkerWSHandlerInstance)},
+		{Method: http.MethodDelete, Path: "/api/v1/worker/console/files", Handler: worker.WorkerFileDeleteHandler(svcCtx, WorkerWSHandlerInstance)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/console/files/mkdir", Handler: worker.WorkerFileMkdirHandler(svcCtx, WorkerWSHandlerInstance)},
+		// Worker终端操作（非WebSocket）
+		{Method: http.MethodPost, Path: "/api/v1/worker/console/terminal/open", Handler: worker.WorkerTerminalOpenHandler(svcCtx, WorkerWSHandlerInstance)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/console/terminal/close", Handler: worker.WorkerTerminalCloseHandler(svcCtx, WorkerWSHandlerInstance)},
+		{Method: http.MethodPost, Path: "/api/v1/worker/console/terminal/exec", Handler: worker.WorkerTerminalExecHandler(svcCtx, WorkerWSHandlerInstance)},
+		{Method: http.MethodGet, Path: "/api/v1/worker/console/terminal/history", Handler: worker.WorkerTerminalHistoryHandler(svcCtx)},
+		// 审计日志
+		{Method: http.MethodGet, Path: "/api/v1/worker/console/audit", Handler: worker.WorkerAuditLogHandler(svcCtx)},
+	}
+
+	// 为控制台路由包装认证中间件和管理员权限中间件
+	for i := range consoleRoutes {
+		originalHandler := consoleRoutes[i].Handler
+		consoleRoutes[i].Handler = func(w http.ResponseWriter, r *http.Request) {
+			// 先进行JWT认证
+			authMiddleware.Handle(func(w http.ResponseWriter, r *http.Request) {
+				// 再进行管理员权限检查
+				consoleAuthMiddleware.Handle(http.HandlerFunc(originalHandler)).ServeHTTP(w, r)
+			}).ServeHTTP(w, r)
+		}
+	}
+
+	server.AddRoutes(consoleRoutes)
+
+	// 终端 WebSocket 路由（单独处理，支持从 URL 参数读取 token）
+	terminalWSRoute := []rest.Route{
+		{Method: http.MethodGet, Path: "/api/v1/worker/console/terminal", Handler: worker.WorkerTerminalWSHandlerWithAuth(svcCtx, WorkerWSHandlerInstance)},
+	}
+	server.AddRoutes(terminalWSRoute)
 }

@@ -483,3 +483,18 @@ func (m *FingerprintModel) BulkUpsert(ctx context.Context, docs []*Fingerprint) 
 	// 返回新插入数量和匹配更新数量
 	return inserted, matched, nil
 }
+
+// BatchUpdateEnabled 批量更新指纹启用状态
+func (m *FingerprintModel) BatchUpdateEnabled(ctx context.Context, filter bson.M, enabled bool) (int64, error) {
+	update := bson.M{
+		"$set": bson.M{
+			"enabled":     enabled,
+			"update_time": time.Now(),
+		},
+	}
+	result, err := m.coll.UpdateMany(ctx, filter, update)
+	if err != nil {
+		return 0, err
+	}
+	return result.ModifiedCount, nil
+}

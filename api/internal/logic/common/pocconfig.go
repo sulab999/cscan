@@ -23,6 +23,17 @@ func InjectPocConfig(ctx context.Context, svcCtx *svc.ServiceContext, taskConfig
 		return taskConfig
 	}
 
+	// 检查前端是否已经传递了手动选择的POC ID列表
+	existingNucleiIds := getStringSlice(pocscan, "nucleiTemplateIds")
+	existingCustomIds := getStringSlice(pocscan, "customPocIds")
+
+	// 如果前端已经传递了ID列表（手动选择模式），直接使用，不再自动注入
+	if len(existingNucleiIds) > 0 || len(existingCustomIds) > 0 {
+		logger.Infof("Manual POC selection mode: using %d nuclei templates and %d custom POCs from frontend",
+			len(existingNucleiIds), len(existingCustomIds))
+		return taskConfig
+	}
+
 	// 检查是否启用自动扫描模式
 	autoScan, _ := pocscan["autoScan"].(bool)
 	automaticScan, _ := pocscan["automaticScan"].(bool)
@@ -95,4 +106,23 @@ func InjectPocConfig(ctx context.Context, svcCtx *svc.ServiceContext, taskConfig
 
 	taskConfig["pocscan"] = pocscan
 	return taskConfig
+}
+
+// getStringSlice 从map中获取字符串切片
+func getStringSlice(m map[string]interface{}, key string) []string {
+	if v, ok := m[key]; ok {
+		switch val := v.(type) {
+		case []string:
+			return val
+		case []interface{}:
+			result := make([]string, 0, len(val))
+			for _, item := range val {
+				if s, ok := item.(string); ok {
+					result = append(result, s)
+				}
+			}
+			return result
+		}
+	}
+	return nil
 }

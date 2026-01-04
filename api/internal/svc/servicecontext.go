@@ -32,6 +32,8 @@ type ServiceContext struct {
 	NucleiTemplateModel     *model.NucleiTemplateModel
 	FingerprintModel        *model.FingerprintModel
 	HttpServiceMappingModel *model.HttpServiceMappingModel
+	CommandHistoryModel     *model.CommandHistoryModel
+	AuditLogModel           *model.AuditLogModel
 
 	// 调度器
 	Scheduler *scheduler.Scheduler
@@ -82,6 +84,8 @@ func NewServiceContext(c config.Config) *ServiceContext {
 		NucleiTemplateModel:     model.NewNucleiTemplateModel(mongoDB),
 		FingerprintModel:        model.NewFingerprintModel(mongoDB),
 		HttpServiceMappingModel: model.NewHttpServiceMappingModel(mongoDB),
+		CommandHistoryModel:     model.NewCommandHistoryModel(mongoDB),
+		AuditLogModel:           model.NewAuditLogModel(mongoDB),
 		Scheduler:               scheduler.NewScheduler(rdb),
 		TemplateCategories:      []string{},
 		TemplateTags:            []string{},

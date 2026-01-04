@@ -51,6 +51,11 @@ export function syncNucleiTemplates(data = {}) {
   return request.post('/poc/nuclei/sync', data)
 }
 
+// 清空Nuclei模板
+export function clearNucleiTemplates() {
+  return request.post('/poc/nuclei/clear')
+}
+
 // 更新模板启用状态
 export function updateTemplateEnabled(data) {
   return request.post('/poc/nuclei/updateEnabled', data)
@@ -79,4 +84,20 @@ export function getPocValidationResult(data) {
 // 自定义POC扫描现有资产
 export function scanAssetsWithPoc(data) {
   return request.post('/poc/custom/scanAssets', data)
+}
+
+
+// AI配置
+export function getAIConfig() {
+  return request.post('/ai/config/get')
+}
+
+export function saveAIConfig(data) {
+  return request.post('/ai/config/save', data)
+}
+
+
+// 验证POC语法
+export function validatePocSyntax(data) {
+  return request.post('/poc/custom/validateSyntax', data)
 }

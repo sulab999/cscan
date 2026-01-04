@@ -16,15 +16,26 @@
                 </el-button>
                 <template #dropdown>
                   <el-dropdown-menu>
-                    <el-dropdown-item command="sync">增量同步</el-dropdown-item>
-                    <el-dropdown-item command="force">强制重新同步</el-dropdown-item>
+                    <el-dropdown-item command="local">从本地文件夹导入</el-dropdown-item>
                   </el-dropdown-menu>
                 </template>
               </el-dropdown>
+              <el-button type="danger" size="small" plain style="margin-left: 10px" @click="handleClearTemplates">
+                清空模板
+              </el-button>
+              <input 
+                ref="folderInputRef" 
+                type="file" 
+                webkitdirectory 
+                directory 
+                multiple 
+                style="display: none" 
+                @change="handleFolderSelect"
+              />
             </div>
           </template>
           <p class="tip-text">
-            Nuclei 模板已同步到数据库，扫描时将根据任务配置的严重级别从数据库加载模板。程序启动时自动从 ~/nuclei-templates 同步。
+            Nuclei 模板库，支持从本地 nuclei-templates 文件夹导入模板。扫描时将根据任务配置的严重级别从数据库加载模板。
           </p>
           <!-- 筛选条件 -->
           <el-form :inline="true" class="filter-form">
@@ -40,6 +51,7 @@
                 <el-option label="Medium" value="medium" />
                 <el-option label="Low" value="low" />
                 <el-option label="Info" value="info" />
+                <el-option label="Unknown" value="unknown" />
               </el-select>
             </el-form-item>
             <el-form-item label="标签">
@@ -199,6 +211,7 @@
                 <el-option label="Medium" value="medium" />
                 <el-option label="Low" value="low" />
                 <el-option label="Info" value="info" />
+                <el-option label="Unknown" value="unknown" />
               </el-select>
             </el-form-item>
             <el-form-item label="标签">
@@ -294,8 +307,9 @@
       <el-form ref="customPocFormRef" :model="customPocForm" :rules="customPocRules" label-width="100px">
         <el-form-item label="YAML内容" prop="content">
           <div style="width: 100%">
-            <div style="margin-bottom: 8px; color: #909399; font-size: 12px">
-              粘贴或编辑 Nuclei YAML 模板，下方字段将自动从 YAML 中解析
+            <div style="margin-bottom: 8px; display: flex; justify-content: space-between; align-items: center;">
+              <span style="color: #909399; font-size: 12px">粘贴或编辑 Nuclei YAML 模板，下方字段将自动从 YAML 中解析</span>
+              <el-button type="primary" size="small" @click="showAiAssistDialog" :icon="MagicStick">AI辅助</el-button>
             </div>
             <div class="yaml-editor-wrapper">
               <el-input
@@ -330,6 +344,7 @@
                 <el-option label="Medium" value="medium" />
                 <el-option label="Low" value="low" />
                 <el-option label="Info" value="info" />
+                <el-option label="Unknown" value="unknown" />
               </el-select>
             </el-form-item>
           </el-col>
@@ -356,7 +371,88 @@
       <template #footer>
         <el-button @click="customPocDialogVisible = false">取消</el-button>
         <el-button @click="parseYamlContent">重新解析YAML</el-button>
+        <el-button type="success" @click="handleValidatePocSyntax" :loading="syntaxValidating">验证语法</el-button>
         <el-button type="primary" @click="handleSaveCustomPoc">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- AI辅助编写POC对话框 -->
+    <el-dialog v-model="aiAssistDialogVisible" title="AI辅助编写POC" width="700px">
+      <!-- AI配置折叠面板 -->
+      <el-collapse v-model="aiConfigCollapse" style="margin-bottom: 15px;">
+        <el-collapse-item title="AI服务配置" name="config">
+          <el-form label-width="100px" size="small">
+            <el-form-item label="协议类型">
+              <el-radio-group v-model="aiConfig.protocol">
+                <el-radio-button value="openai">OpenAI</el-radio-button>
+                <el-radio-button value="anthropic">Anthropic</el-radio-button>
+                <el-radio-button value="gemini">Gemini</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+            <el-form-item label="服务地址">
+              <el-input v-model="aiConfig.baseUrl" placeholder="http://127.0.0.1:8045" />
+              <div style="color: #909399; font-size: 12px; margin-top: 4px;">
+                {{ aiConfig.protocol === 'openai' ? 'OpenAI: /v1/chat/completions' : aiConfig.protocol === 'anthropic' ? 'Anthropic: /v1/messages' : 'Gemini: /v1beta/models/...' }}
+              </div>
+            </el-form-item>
+            <el-form-item label="API Key">
+              <el-input v-model="aiConfig.apiKey" placeholder="API密钥" show-password />
+            </el-form-item>
+            <el-form-item label="模型">
+              <el-select v-model="aiConfig.model" placeholder="选择模型" style="width: 100%" allow-create filterable>
+                <el-option label="gemini-2.5-flash" value="gemini-2.5-flash" />
+                <el-option label="gemini-2.5-pro" value="gemini-2.5-pro" />
+                <el-option label="claude-sonnet-4-20250514" value="claude-sonnet-4-20250514" />
+                <el-option label="claude-3-5-sonnet-20241022" value="claude-3-5-sonnet-20241022" />
+                <el-option label="gpt-4o" value="gpt-4o" />
+                <el-option label="gpt-4o-mini" value="gpt-4o-mini" />
+              </el-select>
+            </el-form-item>
+            <el-form-item>
+              <el-button type="primary" size="small" @click="saveAiConfig" :loading="aiSaving">保存配置</el-button>
+              <el-button size="small" @click="testAiConnection" :loading="aiTesting">测试连接</el-button>
+            </el-form-item>
+          </el-form>
+        </el-collapse-item>
+      </el-collapse>
+
+      <el-form label-width="100px">
+        <el-form-item label="漏洞描述">
+          <el-input
+            v-model="aiAssistForm.description"
+            type="textarea"
+            :rows="4"
+            placeholder="请描述要检测的漏洞，例如：&#10;• 检测目标是否存在SQL注入漏洞，路径为/api/search，参数为keyword&#10;• 检测Apache Tomcat CVE-2020-1938 AJP文件读取漏洞&#10;• 检测目标是否存在未授权访问，路径为/admin"
+          />
+        </el-form-item>
+        <el-form-item label="漏洞类型">
+          <el-select v-model="aiAssistForm.vulnType" placeholder="选择漏洞类型" style="width: 100%">
+            <el-option label="SQL注入" value="sqli" />
+            <el-option label="XSS跨站脚本" value="xss" />
+            <el-option label="命令注入" value="rce" />
+            <el-option label="文件包含/读取" value="lfi" />
+            <el-option label="SSRF" value="ssrf" />
+            <el-option label="未授权访问" value="unauth" />
+            <el-option label="信息泄露" value="info-disclosure" />
+            <el-option label="CVE漏洞" value="cve" />
+            <el-option label="其他" value="other" />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="CVE编号" v-if="aiAssistForm.vulnType === 'cve'">
+          <el-input v-model="aiAssistForm.cveId" placeholder="例如：CVE-2021-44228" />
+        </el-form-item>
+        <el-form-item label="参考信息">
+          <el-input
+            v-model="aiAssistForm.reference"
+            type="textarea"
+            :rows="2"
+            placeholder="可选：提供漏洞的参考链接、PoC代码片段等"
+          />
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="aiAssistDialogVisible = false">取消</el-button>
+        <el-button type="primary" @click="generatePocWithAi" :loading="aiGenerating">生成POC</el-button>
       </template>
     </el-dialog>
 
@@ -748,8 +844,8 @@
 <script setup>
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Plus, Refresh, ArrowDown, UploadFilled, Upload, Download, Delete } from '@element-plus/icons-vue'
-import { getTagMappingList, saveTagMapping, deleteTagMapping, getCustomPocList, saveCustomPoc, batchImportCustomPoc, deleteCustomPoc, clearAllCustomPoc, getNucleiTemplateList, getNucleiTemplateCategories, syncNucleiTemplates, getNucleiTemplateDetail, validatePoc as validatePocApi, getPocValidationResult, scanAssetsWithPoc } from '@/api/poc'
+import { Plus, Refresh, ArrowDown, UploadFilled, Upload, Download, Delete, MagicStick } from '@element-plus/icons-vue'
+import { getTagMappingList, saveTagMapping, deleteTagMapping, getCustomPocList, saveCustomPoc, batchImportCustomPoc, deleteCustomPoc, clearAllCustomPoc, getNucleiTemplateList, getNucleiTemplateCategories, syncNucleiTemplates, clearNucleiTemplates, getNucleiTemplateDetail, validatePoc as validatePocApi, getPocValidationResult, scanAssetsWithPoc, getAIConfig, saveAIConfig, validatePocSyntax } from '@/api/poc'
 import jsYaml from 'js-yaml'
 import JSZip from 'jszip'
 import { saveAs } from 'file-saver'
@@ -775,6 +871,8 @@ const templatePagination = reactive({
   total: 0
 })
 const syncLoading = ref(false)
+const folderInputRef = ref(null)
+const forceImport = ref(false)
 const templateContentDialogVisible = ref(false)
 const currentTemplate = ref({})
 
@@ -800,6 +898,147 @@ const tagMappingRules = {
 const customPocs = ref([])
 const customPocLoading = ref(false)
 const customPocDialogVisible = ref(false)
+const syntaxValidating = ref(false) // 语法验证中
+
+// AI辅助编写POC
+const aiAssistDialogVisible = ref(false)
+const aiGenerating = ref(false)
+const aiAssistForm = reactive({
+  description: '',
+  vulnType: '',
+  cveId: '',
+  reference: ''
+})
+
+// AI配置
+const aiConfig = reactive({
+  protocol: 'anthropic', // openai/anthropic/gemini
+  baseUrl: 'http://127.0.0.1:8045',
+  apiKey: '',
+  model: 'gemini-2.5-flash'
+})
+const aiConfigCollapse = ref([]) // 折叠面板状态
+const aiTesting = ref(false) // 测试连接状态
+const aiSaving = ref(false) // 保存配置状态
+
+// 从数据库加载AI配置
+async function loadAiConfig() {
+  try {
+    const res = await getAIConfig()
+    if (res.code === 0 && res.data) {
+      aiConfig.protocol = res.data.protocol || 'anthropic'
+      aiConfig.baseUrl = res.data.baseUrl || 'http://127.0.0.1:8045'
+      aiConfig.apiKey = res.data.apiKey || ''
+      aiConfig.model = res.data.model || 'gemini-2.5-flash'
+    }
+  } catch (e) {
+    console.error('加载AI配置失败:', e)
+  }
+}
+
+// 保存AI配置到数据库
+async function saveAiConfig() {
+  if (!aiConfig.baseUrl) {
+    ElMessage.warning('请输入服务地址')
+    return
+  }
+  
+  aiSaving.value = true
+  try {
+    const res = await saveAIConfig({
+      protocol: aiConfig.protocol,
+      baseUrl: aiConfig.baseUrl,
+      apiKey: aiConfig.apiKey,
+      model: aiConfig.model
+    })
+    if (res.code === 0) {
+      ElMessage.success('AI配置已保存')
+    } else {
+      ElMessage.error(res.msg || '保存配置失败')
+    }
+  } catch (e) {
+    console.error('保存AI配置失败:', e)
+    ElMessage.error('保存配置失败')
+  } finally {
+    aiSaving.value = false
+  }
+}
+
+// 测试AI服务连接
+async function testAiConnection() {
+  if (!aiConfig.baseUrl) {
+    ElMessage.warning('请输入服务地址')
+    return
+  }
+  
+  aiTesting.value = true
+  try {
+    let response
+    
+    if (aiConfig.protocol === 'openai') {
+      // OpenAI 协议
+      response = await fetch(`${aiConfig.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${aiConfig.apiKey}`
+        },
+        body: JSON.stringify({
+          model: aiConfig.model,
+          max_tokens: 10,
+          messages: [
+            { role: 'user', content: 'Hi' }
+          ]
+        })
+      })
+    } else if (aiConfig.protocol === 'gemini') {
+      // Gemini 协议
+      response = await fetch(`${aiConfig.baseUrl}/v1beta/models/${aiConfig.model}:generateContent?key=${aiConfig.apiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          contents: [
+            { parts: [{ text: 'Hi' }] }
+          ]
+        })
+      })
+    } else {
+      // Anthropic 协议 (默认)
+      response = await fetch(`${aiConfig.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': aiConfig.apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: aiConfig.model,
+          max_tokens: 10,
+          messages: [
+            { role: 'user', content: 'Hi' }
+          ]
+        })
+      })
+    }
+    
+    if (response.ok) {
+      ElMessage.success('连接成功')
+    } else {
+      const errorText = await response.text()
+      ElMessage.error(`连接失败: ${response.status} ${errorText.substring(0, 100)}`)
+    }
+  } catch (e) {
+    if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+      ElMessage.error('无法连接到AI服务，请确保服务已启动')
+    } else {
+      ElMessage.error('连接测试失败: ' + e.message)
+    }
+  } finally {
+    aiTesting.value = false
+  }
+}
 
 // 自定义POC筛选条件
 const customPocFilter = reactive({
@@ -837,6 +1076,8 @@ const customPocForm = reactive({
   content: '',
   enabled: true
 })
+// AI生成的POC临时保存（关闭对话框后保留，直到生成新的POC或保存成功）
+const aiGeneratedPocCache = ref('')
 const customPocRules = {
   name: [{ required: true, message: '请输入名称', trigger: 'blur' }],
   templateId: [{ required: true, message: '请输入模板ID', trigger: 'blur' }],
@@ -903,6 +1144,8 @@ const batchTargetUrls = computed(() => {
 })
 
 onMounted(() => {
+  // 加载AI配置
+  loadAiConfig()
   // 只加载当前标签页需要的数据
   loadNucleiTemplateCategories()
   loadNucleiTemplates()
@@ -955,27 +1198,133 @@ async function loadNucleiTemplates() {
 }
 
 async function handleSyncCommand(command) {
-  if (command === 'force') {
-    try {
-      await ElMessageBox.confirm('强制同步将删除所有现有模板并重新导入，确定继续吗？', '提示', { type: 'warning' })
-    } catch {
+  if (command === 'local') {
+    forceImport.value = false
+    folderInputRef.value?.click()
+  }
+}
+
+// 处理文件夹选择
+async function handleFolderSelect(event) {
+  const files = event.target.files
+  if (!files || files.length === 0) return
+  
+  // 筛选 .yaml 和 .yml 文件
+  const yamlFiles = Array.from(files).filter(file => {
+    const name = file.name.toLowerCase()
+    return (name.endsWith('.yaml') || name.endsWith('.yml')) && !file.webkitRelativePath.includes('/.git/')
+  })
+  
+  if (yamlFiles.length === 0) {
+    ElMessage.warning('未找到有效的模板文件（.yaml/.yml）')
+    event.target.value = ''
+    return
+  }
+  
+  ElMessage.info(`正在导入 ${yamlFiles.length} 个模板文件...`)
+  syncLoading.value = true
+  
+  try {
+    // 读取所有文件内容
+    const templates = []
+    for (const file of yamlFiles) {
+      try {
+        const content = await readFileContent(file)
+        // 获取相对路径作为模板路径
+        const relativePath = file.webkitRelativePath || file.name
+        templates.push({
+          path: relativePath,
+          content: content
+        })
+      } catch (e) {
+        console.error('读取文件失败:', file.name, e)
+      }
+    }
+    
+    if (templates.length === 0) {
+      ElMessage.error('没有成功读取任何模板文件')
       return
     }
+    
+    // 分批上传（每批100个）
+    const batchSize = 100
+    let successCount = 0
+    let errorCount = 0
+    
+    for (let i = 0; i < templates.length; i += batchSize) {
+      const batch = templates.slice(i, i + batchSize)
+      const isFirstBatch = i === 0
+      
+      try {
+        const res = await syncNucleiTemplates({
+          templates: batch,
+          force: forceImport.value && isFirstBatch // 只在第一批时清空
+        })
+        if (res.code === 0) {
+          successCount += res.successCount || batch.length
+          errorCount += res.errorCount || 0
+        } else {
+          errorCount += batch.length
+        }
+      } catch (e) {
+        errorCount += batch.length
+      }
+      
+      // 显示进度
+      const progress = Math.min(i + batchSize, templates.length)
+      ElMessage.info(`导入进度: ${progress}/${templates.length}`)
+    }
+    
+    ElMessage.success(`导入完成！成功: ${successCount}, 失败: ${errorCount}`)
+    
+    // 刷新数据
+    setTimeout(() => {
+      loadNucleiTemplateCategories()
+      loadNucleiTemplates()
+    }, 1000)
+    
+  } catch (e) {
+    ElMessage.error('导入失败: ' + e.message)
+  } finally {
+    syncLoading.value = false
+    event.target.value = '' // 清空input以便重复选择
+  }
+}
+
+// 读取文件内容
+function readFileContent(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = (e) => resolve(e.target.result)
+    reader.onerror = (e) => reject(e)
+    reader.readAsText(file)
+  })
+}
+
+// 清空模板
+async function handleClearTemplates() {
+  try {
+    await ElMessageBox.confirm('确定清空所有Nuclei默认模板吗？此操作不可恢复！', '警告', { 
+      type: 'error', 
+      confirmButtonText: '确定清空', 
+      cancelButtonText: '取消' 
+    })
+  } catch {
+    return
   }
   
   syncLoading.value = true
   try {
-    const res = await syncNucleiTemplates({ force: command === 'force' })
+    const res = await clearNucleiTemplates()
     if (res.code === 0) {
-      ElMessage.success(res.msg)
-      // 延迟刷新数据
-      setTimeout(() => {
-        loadNucleiTemplateCategories()
-        loadNucleiTemplates()
-      }, 3000)
+      ElMessage.success(res.msg || '清空成功')
+      loadNucleiTemplateCategories()
+      loadNucleiTemplates()
     } else {
-      ElMessage.error(res.msg)
+      ElMessage.error(res.msg || '清空失败')
     }
+  } catch (e) {
+    ElMessage.error('清空失败: ' + e.message)
   } finally {
     syncLoading.value = false
   }
@@ -988,7 +1337,7 @@ async function showTemplateContent(row) {
     currentTemplate.value = res.data
     // 如果内容为空，提示用户强制同步
     if (!res.data.content) {
-      currentTemplate.value.content = '# YAML内容为空\n# 请点击"同步模板" -> "强制重新同步"来更新模板内容'
+      currentTemplate.value.content = '# YAML内容为空\n# 请点击"同步模板" -> "从本地文件夹导入"来更新模板内容'
     }
   } else {
     currentTemplate.value = { ...row, content: '加载失败，请重试' }
@@ -1133,6 +1482,8 @@ function showCustomPocForm(row = null) {
       enabled: row.enabled
     })
   } else {
+    // 新建时检查是否有AI生成的缓存
+    const cachedContent = aiGeneratedPocCache.value
     Object.assign(customPocForm, {
       id: '',
       name: '',
@@ -1142,13 +1493,40 @@ function showCustomPocForm(row = null) {
       tagsInput: '',
       author: '',
       description: '',
-      content: getNucleiTemplate(),
+      content: cachedContent || getNucleiTemplate(),
       enabled: true
     })
-    // 新建时自动解析默认模板
+    // 自动解析内容
     parseYamlContent()
   }
   customPocDialogVisible.value = true
+}
+
+// 验证POC语法
+async function handleValidatePocSyntax() {
+  if (!customPocForm.content) {
+    ElMessage.warning('请先输入POC内容')
+    return
+  }
+  
+  syntaxValidating.value = true
+  try {
+    const res = await validatePocSyntax({ content: customPocForm.content })
+    if (res.code === 0) {
+      if (res.valid) {
+        ElMessage.success('POC语法验证通过')
+      } else {
+        ElMessage.error('POC语法错误: ' + res.error)
+      }
+    } else {
+      ElMessage.error(res.msg || '验证失败')
+    }
+  } catch (e) {
+    console.error('验证POC语法失败:', e)
+    ElMessage.error('验证失败: ' + e.message)
+  } finally {
+    syntaxValidating.value = false
+  }
 }
 
 async function handleSaveCustomPoc() {
@@ -1175,6 +1553,8 @@ async function handleSaveCustomPoc() {
   if (res.code === 0) {
     ElMessage.success('保存成功')
     customPocDialogVisible.value = false
+    // 保存成功后清除AI生成的缓存
+    aiGeneratedPocCache.value = ''
     loadCustomPocs()
   } else {
     ElMessage.error(res.msg)
@@ -1375,7 +1755,7 @@ function parseYamlToPreview(content) {
     const severityMatch = infoBlock.match(/^\s+severity:\s*(.+)$/m)
     if (severityMatch) {
       const severity = severityMatch[1].trim().toLowerCase()
-      if (['critical', 'high', 'medium', 'low', 'info'].includes(severity)) {
+      if (['critical', 'high', 'medium', 'low', 'info', 'unknown'].includes(severity)) {
         result.severity = severity
       }
     }
@@ -2138,7 +2518,7 @@ function parseYamlContent() {
     const severityMatch = infoBlock.match(/^\s+severity:\s*(.+)$/m)
     if (severityMatch) {
       const severity = severityMatch[1].trim().toLowerCase()
-      if (['critical', 'high', 'medium', 'low', 'info'].includes(severity)) {
+      if (['critical', 'high', 'medium', 'low', 'info', 'unknown'].includes(severity)) {
         customPocForm.severity = severity
       }
     }
@@ -2945,6 +3325,201 @@ function startBatchPolling(batchId, taskIds) {
       }
     }
   }, 2000)
+}
+
+// 显示AI辅助对话框
+function showAiAssistDialog() {
+  aiAssistForm.description = ''
+  aiAssistForm.vulnType = ''
+  aiAssistForm.cveId = ''
+  aiAssistForm.reference = ''
+  aiAssistDialogVisible.value = true
+}
+
+// 使用AI生成POC
+async function generatePocWithAi() {
+  if (!aiAssistForm.description && !aiAssistForm.cveId) {
+    ElMessage.warning('请输入漏洞描述或CVE编号')
+    return
+  }
+  
+  if (!aiConfig.baseUrl) {
+    ElMessage.warning('请先配置AI服务地址')
+    aiConfigCollapse.value = ['config']
+    return
+  }
+  
+  aiGenerating.value = true
+  try {
+    // 构建提示词
+    const prompt = buildPocPrompt()
+    
+    let response
+    let content = ''
+    
+    if (aiConfig.protocol === 'openai') {
+      // OpenAI 协议
+      response = await fetch(`${aiConfig.baseUrl}/v1/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${aiConfig.apiKey}`
+        },
+        body: JSON.stringify({
+          model: aiConfig.model,
+          max_tokens: 4096,
+          messages: [
+            { role: 'user', content: prompt }
+          ]
+        })
+      })
+      
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`AI服务请求失败: ${response.status} ${errorText}`)
+      }
+      
+      const data = await response.json()
+      if (data.choices && data.choices.length > 0) {
+        content = data.choices[0].message?.content || ''
+      }
+    } else if (aiConfig.protocol === 'gemini') {
+      // Gemini 协议
+      response = await fetch(`${aiConfig.baseUrl}/v1beta/models/${aiConfig.model}:generateContent?key=${aiConfig.apiKey}`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          contents: [
+            { parts: [{ text: prompt }] }
+          ],
+          generationConfig: {
+            maxOutputTokens: 4096
+          }
+        })
+      })
+      
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`AI服务请求失败: ${response.status} ${errorText}`)
+      }
+      
+      const data = await response.json()
+      if (data.candidates && data.candidates.length > 0) {
+        const parts = data.candidates[0].content?.parts || []
+        content = parts.map(p => p.text || '').join('')
+      }
+    } else {
+      // Anthropic 协议 (默认)
+      response = await fetch(`${aiConfig.baseUrl}/v1/messages`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': aiConfig.apiKey,
+          'anthropic-version': '2023-06-01'
+        },
+        body: JSON.stringify({
+          model: aiConfig.model,
+          max_tokens: 4096,
+          messages: [
+            { role: 'user', content: prompt }
+          ]
+        })
+      })
+      
+      if (!response.ok) {
+        const errorText = await response.text()
+        throw new Error(`AI服务请求失败: ${response.status} ${errorText}`)
+      }
+      
+      const data = await response.json()
+      if (data.content && data.content.length > 0) {
+        content = data.content[0].text || ''
+      }
+    }
+    
+    // 提取YAML代码块
+    const yamlMatch = content.match(/```ya?ml\n([\s\S]*?)```/)
+    if (yamlMatch) {
+      content = yamlMatch[1].trim()
+    } else {
+      // 尝试直接使用内容（如果看起来像YAML）
+      if (content.includes('id:') && content.includes('info:')) {
+        // 移除可能的markdown标记
+        content = content.replace(/```ya?ml\n?/g, '').replace(/```\n?/g, '').trim()
+      }
+    }
+    
+    if (!content || !content.includes('id:')) {
+      throw new Error('AI返回的内容不是有效的Nuclei POC格式')
+    }
+    
+    // 保存到缓存（关闭对话框后仍可恢复）
+    aiGeneratedPocCache.value = content
+    // 将生成的POC填入编辑框
+    customPocForm.content = content
+    // 自动解析YAML
+    parseYamlContent()
+    aiAssistDialogVisible.value = false
+    ElMessage.success('POC生成成功，请检查并修改后保存')
+  } catch (e) {
+    console.error('AI生成POC失败:', e)
+    if (e.message.includes('Failed to fetch') || e.message.includes('NetworkError')) {
+      ElMessage.error('无法连接到AI服务，请确保服务已启动')
+    } else {
+      ElMessage.error('AI生成POC失败: ' + (e.message || '未知错误'))
+    }
+  } finally {
+    aiGenerating.value = false
+  }
+}
+
+// 构建POC生成提示词
+function buildPocPrompt() {
+  const vulnTypeMap = {
+    'sqli': 'SQL注入',
+    'xss': 'XSS跨站脚本',
+    'rce': '命令注入/远程代码执行',
+    'lfi': '文件包含/文件读取',
+    'ssrf': 'SSRF服务端请求伪造',
+    'unauth': '未授权访问',
+    'info-disclosure': '信息泄露',
+    'cve': 'CVE漏洞',
+    'other': '其他'
+  }
+  
+  let prompt = `你是一个专业的安全研究员，擅长编写Nuclei漏洞检测模板。请根据以下信息生成一个Nuclei YAML格式的POC模板。
+
+要求：
+1. 生成标准的Nuclei YAML模板格式
+2. 包含完整的id、info、http/tcp等部分
+3. 使用合适的匹配器(matchers)来检测漏洞
+4. 添加适当的标签(tags)
+5. 只输出YAML代码，不要其他解释
+
+`
+
+  if (aiAssistForm.cveId) {
+    prompt += `CVE编号: ${aiAssistForm.cveId}\n`
+  }
+  
+  if (aiAssistForm.vulnType) {
+    prompt += `漏洞类型: ${vulnTypeMap[aiAssistForm.vulnType] || aiAssistForm.vulnType}\n`
+  }
+  
+  if (aiAssistForm.description) {
+    prompt += `漏洞描述: ${aiAssistForm.description}\n`
+  }
+  
+  if (aiAssistForm.reference) {
+    prompt += `参考信息: ${aiAssistForm.reference}\n`
+  }
+  
+  prompt += `
+请生成Nuclei POC模板：`
+
+  return prompt
 }
 </script>
 

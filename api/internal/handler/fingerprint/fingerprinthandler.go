@@ -118,6 +118,29 @@ func FingerprintUpdateEnabledHandler(svcCtx *svc.ServiceContext) http.HandlerFun
 	}
 }
 
+// FingerprintBatchUpdateEnabledHandler 批量更新指纹启用状态
+func FingerprintBatchUpdateEnabledHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Ids     []string `json:"ids"`     // 指定ID列表（可选）
+			Enabled bool     `json:"enabled"` // 启用/禁用
+			All     bool     `json:"all"`     // 是否操作全部自定义指纹
+		}
+		if err := httpx.Parse(r, &req); err != nil {
+			response.ParamError(w, err.Error())
+			return
+		}
+
+		l := logic.NewFingerprintBatchUpdateEnabledLogic(r.Context(), svcCtx)
+		resp, err := l.BatchUpdateEnabled(req.Ids, req.Enabled, req.All)
+		if err != nil {
+			response.Error(w, err)
+			return
+		}
+		httpx.OkJson(w, resp)
+	}
+}
+
 // FingerprintImportHandler 导入指纹
 func FingerprintImportHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

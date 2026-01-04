@@ -21,6 +21,7 @@
         <el-form-item>
           <el-button type="primary" @click="handleSearch">搜索</el-button>
           <el-button @click="handleReset">重置</el-button>
+          <el-button type="danger" plain @click="handleClear">清空数据</el-button>
         </el-form-item>
       </el-form>
     </el-card>
@@ -61,9 +62,17 @@
           <el-button type="danger" size="small" :disabled="selectedRows.length === 0" @click="handleBatchDelete">
             批量删除 ({{ selectedRows.length }})
           </el-button>
-          <el-button type="danger" size="small" plain @click="handleClear">
-            清空数据
-          </el-button>
+          <el-dropdown style="margin-left: 10px" @command="handleExport">
+            <el-button type="success" size="small">
+              导出<el-icon class="el-icon--right"><ArrowDown /></el-icon>
+            </el-button>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="selected-domain" :disabled="selectedRows.length === 0">导出选中域名 ({{ selectedRows.length }})</el-dropdown-item>
+                <el-dropdown-item divided command="all-domain">导出全部域名</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </div>
       
@@ -127,6 +136,7 @@
 <script setup>
 import { ref, reactive, onMounted, onUnmounted } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { ArrowDown } from '@element-plus/icons-vue'
 import request from '@/api/request'
 import { clearAsset } from '@/api/asset'
 
@@ -207,6 +217,69 @@ async function handleClear() {
   const res = await clearAsset()
   if (res.code === 0) { ElMessage.success(res.msg || '清空成功'); selectedRows.value = []; loadData(); loadStat(); emit('data-changed') }
   else { ElMessage.error(res.msg || '清空失败') }
+}
+
+// 导出功能
+async function handleExport(command) {
+  let data = []
+  let filename = ''
+  
+  if (command === 'selected-domain') {
+    if (selectedRows.value.length === 0) {
+      ElMessage.warning('请先选择要导出的域名')
+      return
+    }
+    data = selectedRows.value
+    filename = 'domains_selected.txt'
+  } else {
+    ElMessage.info('正在获取全部数据...')
+    try {
+      const res = await request.post('/asset/domain/list', {
+        ...searchForm, page: 1, pageSize: 10000
+      })
+      if (res.code === 0) {
+        data = res.list || []
+      } else {
+        ElMessage.error('获取数据失败')
+        return
+      }
+    } catch (e) {
+      ElMessage.error('获取数据失败')
+      return
+    }
+    filename = 'domains_all.txt'
+  }
+  
+  if (data.length === 0) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+  
+  const seen = new Set()
+  const exportData = []
+  for (const row of data) {
+    if (row.domain && !seen.has(row.domain)) {
+      seen.add(row.domain)
+      exportData.push(row.domain)
+    }
+  }
+  
+  if (exportData.length === 0) {
+    ElMessage.warning('没有可导出的数据')
+    return
+  }
+  
+  const blob = new Blob([exportData.join('\n')], { type: 'text/plain;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = filename
+  document.body.appendChild(link)
+  link.click()
+  document.body.removeChild(link)
+  URL.revokeObjectURL(url)
+  
+  ElMessage.success(`成功导出 ${exportData.length} 条数据`)
 }
 
 function refresh() { loadData(); loadStat() }

@@ -153,16 +153,9 @@ func (s *FingerprintScanner) Scan(ctx context.Context, config *ScanConfig) (*Sca
 	// 根据选择的工具执行扫描
 	useHttpx := opts.Tool == "httpx"
 	if useHttpx {
-		// 检查httpx是否可用
-		httpxInstalled := checkHttpxInstalled()
-		if httpxInstalled {
-			taskLog("DEBUG", "Using httpx for fingerprint detection")
-			s.runHttpx(ctx, httpAssets, opts)
-		} else {
-			logx.Info("httpx not installed, falling back to builtin method")
-			taskLog("WARN", "httpx not installed, falling back to builtin method")
-			useHttpx = false
-		}
+		// 使用httpx库进行扫描（不再依赖命令行工具）
+		taskLog("DEBUG", "Using httpx library for fingerprint detection")
+		s.runHttpxLib(ctx, httpAssets, opts)
 	} else {
 		taskLog("DEBUG", "Using builtin method for fingerprint detection")
 	}

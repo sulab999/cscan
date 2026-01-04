@@ -220,6 +220,21 @@ type AssetBatchDeleteReq struct {
 	Ids []string `json:"ids"`
 }
 
+// AssetImportReq 资产导入请求
+type AssetImportReq struct {
+	Targets []string `json:"targets"` // 目标列表，支持 IP:端口 或 URL 格式
+}
+
+// AssetImportResp 资产导入响应
+type AssetImportResp struct {
+	Code       int    `json:"code"`
+	Msg        string `json:"msg"`
+	Total      int    `json:"total"`      // 总数
+	NewCount   int    `json:"newCount"`   // 新增数量
+	SkipCount  int    `json:"skipCount"`  // 跳过数量（已存在）
+	ErrorCount int    `json:"errorCount"` // 错误数量
+}
+
 type AssetHistoryReq struct {
 	AssetId string `json:"assetId"`
 	Limit   int    `json:"limit,default=20"`
@@ -291,6 +306,14 @@ type SiteStatResp struct {
 	HttpCount  int `json:"httpCount"`
 	HttpsCount int `json:"httpsCount"`
 	NewCount   int `json:"newCount"`
+}
+
+type SiteDeleteReq struct {
+	Id string `json:"id"`
+}
+
+type SiteBatchDeleteReq struct {
+	Ids []string `json:"ids"`
 }
 
 // ==================== 域名管理 ====================
@@ -838,6 +861,19 @@ type CustomPocDeleteReq struct {
 	Id string `json:"id"`
 }
 
+// ValidatePocSyntaxReq 验证POC语法请求
+type ValidatePocSyntaxReq struct {
+	Content string `json:"content"` // POC YAML内容
+}
+
+// ValidatePocSyntaxResp 验证POC语法响应
+type ValidatePocSyntaxResp struct {
+	Code  int    `json:"code"`
+	Msg   string `json:"msg"`
+	Valid bool   `json:"valid"` // 是否有效
+	Error string `json:"error"` // 错误信息（如果无效）
+}
+
 // CustomPocBatchImportReq 批量导入自定义POC请求
 type CustomPocBatchImportReq struct {
 	Pocs []CustomPocSaveReq `json:"pocs"` // POC列表
@@ -949,6 +985,26 @@ type NucleiTemplateDetailResp struct {
 	Code int                     `json:"code"`
 	Msg  string                  `json:"msg"`
 	Data *NucleiTemplateWithContent `json:"data"`
+}
+
+// NucleiTemplateSyncReq 同步Nuclei模板请求
+type NucleiTemplateSyncReq struct {
+	Force     bool                      `json:"force,optional"`     // 是否强制清空后导入
+	Templates []NucleiTemplateUploadItem `json:"templates,optional"` // 上传的模板列表
+}
+
+// NucleiTemplateUploadItem 上传的模板项
+type NucleiTemplateUploadItem struct {
+	Path    string `json:"path"`    // 相对路径
+	Content string `json:"content"` // 模板内容
+}
+
+// NucleiTemplateSyncResp 同步Nuclei模板响应
+type NucleiTemplateSyncResp struct {
+	Code         int    `json:"code"`
+	Msg          string `json:"msg"`
+	SuccessCount int    `json:"successCount"` // 成功数量
+	ErrorCount   int    `json:"errorCount"`   // 失败数量
 }
 
 type NucleiTemplateWithContent struct {
@@ -1356,4 +1412,102 @@ type SubfinderProviderInfoResp struct {
 	Code int                     `json:"code"`
 	Msg  string                  `json:"msg"`
 	List []SubfinderProviderMeta `json:"list"`
+}
+
+// ==================== AI辅助 ====================
+
+type GeneratePocReq struct {
+	Description string `json:"description,optional"` // 漏洞描述
+	VulnType    string `json:"vulnType,optional"`    // 漏洞类型
+	CveId       string `json:"cveId,optional"`       // CVE编号
+	Reference   string `json:"reference,optional"`   // 参考信息
+}
+
+type GeneratePocResp struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data *GeneratePocData `json:"data,omitempty"`
+}
+
+type GeneratePocData struct {
+	Content string `json:"content"` // 生成的POC YAML内容
+}
+
+// AI配置
+type AIConfig struct {
+	Id         string `json:"id"`
+	Protocol   string `json:"protocol"`   // openai/anthropic/gemini
+	BaseUrl    string `json:"baseUrl"`    // 服务地址
+	ApiKey     string `json:"apiKey"`     // API密钥
+	Model      string `json:"model"`      // 模型名称
+	Status     string `json:"status"`     // enable/disable
+	CreateTime string `json:"createTime"`
+	UpdateTime string `json:"updateTime"`
+}
+
+type AIConfigGetResp struct {
+	Code int       `json:"code"`
+	Msg  string    `json:"msg"`
+	Data *AIConfig `json:"data,omitempty"`
+}
+
+type AIConfigSaveReq struct {
+	Protocol string `json:"protocol"` // openai/anthropic/gemini
+	BaseUrl  string `json:"baseUrl"`
+	ApiKey   string `json:"apiKey"`
+	Model    string `json:"model"`
+}
+
+
+// ==================== Worker安装管理 ====================
+
+// WorkerInstallCommandReq 获取Worker安装命令请求
+type WorkerInstallCommandReq struct {
+	ServerAddr string `json:"serverAddr,optional"` // API服务地址（可选，默认自动获取）
+	RpcAddr    string `json:"rpcAddr,optional"`    // RPC服务地址（可选，默认自动获取）
+	RedisAddr  string `json:"redisAddr,optional"`  // Redis地址（可选，默认自动获取）
+}
+
+// WorkerInstallCommandResp 获取Worker安装命令响应
+type WorkerInstallCommandResp struct {
+	Code       int               `json:"code"`
+	Msg        string            `json:"msg"`
+	InstallKey string            `json:"installKey"` // 安装密钥
+	ServerAddr string            `json:"serverAddr"` // API服务地址
+	RpcAddr    string            `json:"rpcAddr"`    // RPC服务地址
+	RedisAddr  string            `json:"redisAddr"`  // Redis地址
+	Commands   map[string]string `json:"commands"`   // 各平台安装命令
+}
+
+// WorkerRefreshKeyResp 刷新安装密钥响应
+type WorkerRefreshKeyResp struct {
+	Code       int    `json:"code"`
+	Msg        string `json:"msg"`
+	InstallKey string `json:"installKey"` // 新的安装密钥
+}
+
+// WorkerValidateKeyReq 验证安装密钥请求（Worker调用）
+type WorkerValidateKeyReq struct {
+	InstallKey string `json:"installKey"` // 安装密钥
+	WorkerName string `json:"workerName"` // Worker名称
+	WorkerIP   string `json:"workerIP"`   // Worker IP
+	WorkerOS   string `json:"workerOS"`   // 操作系统
+	WorkerArch string `json:"workerArch"` // 架构
+}
+
+// WorkerValidateKeyResp 验证安装密钥响应
+type WorkerValidateKeyResp struct {
+	Code  int    `json:"code"`
+	Msg   string `json:"msg"`
+	Valid bool   `json:"valid"` // 是否有效
+}
+
+// WorkerBinaryInfoResp Worker二进制文件信息响应
+type WorkerBinaryInfoResp struct {
+	Code     int    `json:"code"`
+	Msg      string `json:"msg"`
+	Filename string `json:"filename"` // 文件名
+	OS       string `json:"os"`       // 操作系统
+	Arch     string `json:"arch"`     // 架构
+	Version  string `json:"version"`  // 版本
 }

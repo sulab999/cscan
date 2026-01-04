@@ -28,3 +28,7 @@ TaskRpc:
   Endpoints:
     - localhost:9000
   Timeout: 30000
+
+WorkerInstall:
+  ServerAddr: "localhost:8888"  # API服务外部访问地址
+  RpcAddr: "localhost:9000"     # RPC服务外部访问地址
