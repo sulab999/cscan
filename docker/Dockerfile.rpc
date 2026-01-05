@@ -1,6 +1,7 @@
 # CSCAN RPC 服务 Dockerfile
+# 支持多架构: linux/amd64, linux/arm64
 
-FROM golang:1.24-alpine AS builder
+FROM docker.1ms.run/golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -16,11 +17,10 @@ RUN go mod download
 COPY . .
 
 # 编译 RPC 服务 - 自动适配当前架构
-ARG TARGETARCH
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=${TARGETARCH} go build -ldflags="-s -w" -o /cscan-rpc ./rpc/task/task.go
+RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /cscan-rpc ./rpc/task/task.go
 
 # 运行镜像
-FROM alpine:3.18
+FROM docker.1ms.run/alpine:3.19
 
 WORKDIR /app
 

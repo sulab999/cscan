@@ -1,0 +1,39 @@
+package worker
+
+import (
+	"net/http"
+
+	"cscan/api/internal/svc"
+)
+
+// DockerComposeWorkerHandler 提供 docker-compose-worker.yaml 静态文件
+func DockerComposeWorkerHandler(svcCtx *svc.ServiceContext) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		content := `# CSCAN Worker 探针部署
+#
+# 使用方法:
+#   CSCAN_SERVER=http://your-server:8888 CSCAN_KEY=your-key docker-compose -f docker-compose-worker.yaml up -d
+#
+# 环境变量:
+#   CSCAN_SERVER: API服务器地址 (必填)
+#   CSCAN_KEY: 安装密钥 (必填，从管理后台获取)
+#   CSCAN_NAME: Worker名称 (可选，默认自动生成)
+#   CSCAN_CONCURRENCY: 并发数 (可选，默认5)
+
+services:
+  cscan-worker:
+    image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan-worker:latest
+    container_name: cscan-worker
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - CSCAN_SERVER=${CSCAN_SERVER}
+      - CSCAN_KEY=${CSCAN_KEY}
+      - CSCAN_NAME=${CSCAN_NAME:-}
+      - CSCAN_CONCURRENCY=${CSCAN_CONCURRENCY:-5}
+`
+		w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+		w.Header().Set("Content-Disposition", "attachment; filename=docker-compose-worker.yaml")
+		w.Write([]byte(content))
+	}
+}

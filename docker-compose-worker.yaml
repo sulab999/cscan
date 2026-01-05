@@ -1,0 +1,11 @@
+services:
+  cscan-worker:
+    image: registry.cn-hangzhou.aliyuncs.com/txf7/cscan-worker:latest
+    container_name: cscan-worker
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - CSCAN_SERVER=${CSCAN_SERVER}
+      - CSCAN_KEY=${CSCAN_KEY}
+      - CSCAN_NAME=${CSCAN_NAME:-}
+      - CSCAN_CONCURRENCY=${CSCAN_CONCURRENCY:-5}

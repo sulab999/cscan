@@ -41,6 +41,8 @@ func RegisterHandlers(server *rest.Server, svcCtx *svc.ServiceContext) {
 			{Method: http.MethodPost, Path: "/api/v1/worker/validate", Handler: worker.WorkerValidateKeyHandler(svcCtx)},
 			// Worker WebSocket端点（认证在WebSocket握手后进行）
 			{Method: http.MethodGet, Path: "/api/v1/worker/ws", Handler: worker.WorkerWSEndpointHandler(svcCtx, WorkerWSHandlerInstance)},
+			// 静态文件 - docker-compose-worker.yaml
+			{Method: http.MethodGet, Path: "/static/docker-compose-worker.yaml", Handler: worker.DockerComposeWorkerHandler(svcCtx)},
 		},
 	)
 

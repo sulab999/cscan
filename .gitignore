@@ -8,4 +8,5 @@ output/
 poc/
 DEV.md
 docker-compose-arm64.yaml
-bin/
+scripts/
+screenshot/

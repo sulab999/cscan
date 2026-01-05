@@ -33,6 +33,10 @@ export default defineConfig({
             }
           })
         }
+      },
+      '/static': {
+        target: 'http://localhost:8888',
+        changeOrigin: true
       }
     }
   }

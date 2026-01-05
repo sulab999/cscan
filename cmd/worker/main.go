@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -21,17 +22,35 @@ import (
 )
 
 var (
-	// 新参数：-s 改为 API 服务地址
-	serverAddr  = flag.String("s", "http://localhost:8888", "API server address (e.g., http://192.168.1.100:8888)")
-	workerName  = flag.String("n", "", "worker name (default: hostname-pid)")
-	concurrency = flag.Int("c", 5, "concurrency")
-	installKey  = flag.String("k", "", "install key for authentication")
+	// 新参数：-s 改为 API 服务地址（支持环境变量 CSCAN_SERVER）
+	serverAddr  = flag.String("s", getEnvOrDefault("CSCAN_SERVER", "http://localhost:8888"), "API server address (e.g., http://192.168.1.100:8888)")
+	workerName  = flag.String("n", getEnvOrDefault("CSCAN_NAME", ""), "worker name (default: hostname-pid)")
+	concurrency = flag.Int("c", getEnvIntOrDefault("CSCAN_CONCURRENCY", 5), "concurrency")
+	installKey  = flag.String("k", getEnvOrDefault("CSCAN_KEY", ""), "install key for authentication")
 
 	// 废弃参数（保留兼容性，但会输出警告）
 	redisAddr = flag.String("r", "", "[DEPRECATED] redis address - no longer needed, will be ignored")
 	redisPass = flag.String("rp", "", "[DEPRECATED] redis password - no longer needed, will be ignored")
 	apiAddr   = flag.String("a", "", "[DEPRECATED] use -s instead for API server address")
 )
+
+// getEnvOrDefault 获取环境变量，如果不存在则返回默认值
+func getEnvOrDefault(key, defaultVal string) string {
+	if val := os.Getenv(key); val != "" {
+		return val
+	}
+	return defaultVal
+}
+
+// getEnvIntOrDefault 获取环境变量（整数），如果不存在则返回默认值
+func getEnvIntOrDefault(key string, defaultVal int) int {
+	if val := os.Getenv(key); val != "" {
+		if i, err := strconv.Atoi(val); err == nil {
+			return i
+		}
+	}
+	return defaultVal
+}
 
 // validateInstallKey 验证安装密钥
 func validateInstallKey(apiServer, key, name string) error {

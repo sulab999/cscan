@@ -1,4 +1,7 @@
-FROM node:20-alpine AS builder
+# CSCAN Web 前端 Dockerfile
+# 支持多架构: linux/amd64, linux/arm64
+
+FROM docker.1ms.run/node:20-alpine AS builder
 
 WORKDIR /app
 
@@ -8,7 +11,7 @@ RUN npm install
 COPY . .
 RUN npm run build
 
-FROM nginx:alpine
+FROM docker.1ms.run/nginx:alpine
 
 COPY --from=builder /app/dist /usr/share/nginx/html
 COPY nginx.conf /etc/nginx/conf.d/default.conf

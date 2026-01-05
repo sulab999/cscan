@@ -153,11 +153,11 @@
     </el-dialog>
 
     <!-- Worker安装对话框 -->
-    <el-dialog v-model="installDialogVisible" title="安装Worker探针" width="700px">
+    <el-dialog v-model="installDialogVisible" title="安装Worker探针" width="800px">
       <div class="install-dialog">
-        <el-alert type="info" :closable="false" style="margin-bottom: 20px">
+        <el-alert type="success" :closable="false" style="margin-bottom: 20px">
           <template #title>
-            在目标机器上执行以下命令，即可自动下载并启动Worker探针连接到本服务端
+            使用 Docker 一键部署 Worker 探针，无需关心系统环境兼容性问题
           </template>
         </el-alert>
 
@@ -171,60 +171,116 @@
           </el-form-item>
 
           <el-form-item label="服务地址">
-            <el-input v-model="installInfo.serverAddr" placeholder="API服务地址 (如 http://server:8888)" style="width: 300px" />
+            <code style="background: #f5f7fa; padding: 8px 12px; border-radius: 4px;">{{ installInfo.serverAddr }}</code>
+            <span style="margin-left: 10px; color: #909399; font-size: 12px;">（自动获取当前访问地址）</span>
           </el-form-item>
         </el-form>
 
-        <el-divider content-position="left">选择操作系统</el-divider>
+        <el-divider content-position="left">Docker 部署命令</el-divider>
 
-        <el-tabs v-model="activeOsTab" type="border-card">
-          <el-tab-pane label="Linux" name="linux">
+        <el-tabs v-model="installOsTab" type="border-card">
+          <el-tab-pane label="Linux / macOS" name="linux">
             <div class="command-section">
-              <p class="command-title">一键安装（前台运行）：</p>
+              <p class="command-title">1. 下载配置文件：</p>
               <div class="command-box">
-                <code>{{ installInfo.commands?.linux || '加载中...' }}</code>
-                <el-button size="small" @click="copyToClipboard(installInfo.commands?.linux)">复制</el-button>
+                <code>curl -O {{ installInfo.serverAddr }}/static/docker-compose-worker.yaml</code>
+                <el-button size="small" @click="copyToClipboard(`curl -O ${installInfo.serverAddr}/static/docker-compose-worker.yaml`)">复制</el-button>
               </div>
-              <p class="command-title" style="margin-top: 15px">后台运行：</p>
+
+              <p class="command-title" style="margin-top: 15px">2. 启动探针：</p>
               <div class="command-box">
-                <code>{{ installInfo.commands?.linux_daemon || '加载中...' }}</code>
-                <el-button size="small" @click="copyToClipboard(installInfo.commands?.linux_daemon)">复制</el-button>
+                <code>CSCAN_SERVER={{ installInfo.serverAddr }} CSCAN_KEY={{ installInfo.installKey }} docker-compose -f docker-compose-worker.yaml up -d</code>
+                <el-button size="small" @click="copyToClipboard(`CSCAN_SERVER=${installInfo.serverAddr} CSCAN_KEY=${installInfo.installKey} docker-compose -f docker-compose-worker.yaml up -d`)">复制</el-button>
+              </div>
+
+              <p class="command-title" style="margin-top: 15px">一键执行：</p>
+              <div class="command-box">
+                <code>curl -O {{ installInfo.serverAddr }}/static/docker-compose-worker.yaml && CSCAN_SERVER={{ installInfo.serverAddr }} CSCAN_KEY={{ installInfo.installKey }} docker-compose -f docker-compose-worker.yaml up -d</code>
+                <el-button size="small" @click="copyToClipboard(`curl -O ${installInfo.serverAddr}/static/docker-compose-worker.yaml && CSCAN_SERVER=${installInfo.serverAddr} CSCAN_KEY=${installInfo.installKey} docker-compose -f docker-compose-worker.yaml up -d`)">复制</el-button>
               </div>
             </div>
           </el-tab-pane>
 
-          <el-tab-pane label="Windows" name="windows">
+          <el-tab-pane label="Windows (PowerShell)" name="windows">
             <div class="command-section">
-              <p class="command-title">PowerShell安装：</p>
+              <p class="command-title">1. 下载配置文件：</p>
               <div class="command-box">
-                <code>{{ installInfo.commands?.windows || '加载中...' }}</code>
-                <el-button size="small" @click="copyToClipboard(installInfo.commands?.windows)">复制</el-button>
+                <code>{{ psDownloadCmd }}</code>
+                <el-button size="small" @click="copyToClipboard(psDownloadCmd)">复制</el-button>
               </div>
-              <p class="command-title" style="margin-top: 15px">CMD安装（certutil）：</p>
+
+              <p class="command-title" style="margin-top: 15px">2. 启动探针：</p>
               <div class="command-box">
-                <code>{{ installInfo.commands?.windows_cmd || '加载中...' }}</code>
-                <el-button size="small" @click="copyToClipboard(installInfo.commands?.windows_cmd)">复制</el-button>
+                <code>{{ psStartCmd }}</code>
+                <el-button size="small" @click="copyToClipboard(psStartCmd)">复制</el-button>
+              </div>
+
+              <p class="command-title" style="margin-top: 15px">一键执行：</p>
+              <div class="command-box">
+                <code>{{ psOneKeyCmd }}</code>
+                <el-button size="small" @click="copyToClipboard(psOneKeyCmd)">复制</el-button>
               </div>
             </div>
           </el-tab-pane>
 
-          <!-- <el-tab-pane label="macOS" name="darwin">
+          <el-tab-pane label="Windows (CMD)" name="cmd">
             <div class="command-section">
-              <p class="command-title">一键安装：</p>
+              <p class="command-title">1. 下载配置文件：</p>
               <div class="command-box">
-                <code>{{ installInfo.commands?.darwin || '加载中...' }}</code>
-                <el-button size="small" @click="copyToClipboard(installInfo.commands?.darwin)">复制</el-button>
+                <code>curl -O {{ installInfo.serverAddr }}/static/docker-compose-worker.yaml</code>
+                <el-button size="small" @click="copyToClipboard(`curl -O ${installInfo.serverAddr}/static/docker-compose-worker.yaml`)">复制</el-button>
+              </div>
+
+              <p class="command-title" style="margin-top: 15px">2. 设置环境变量并启动：</p>
+              <div class="command-box">
+                <code>set CSCAN_SERVER={{ installInfo.serverAddr }} && set CSCAN_KEY={{ installInfo.installKey }} && docker-compose -f docker-compose-worker.yaml up -d</code>
+                <el-button size="small" @click="copyToClipboard(`set CSCAN_SERVER=${installInfo.serverAddr} && set CSCAN_KEY=${installInfo.installKey} && docker-compose -f docker-compose-worker.yaml up -d`)">复制</el-button>
               </div>
             </div>
-          </el-tab-pane> -->
+          </el-tab-pane>
         </el-tabs>
 
-        <el-divider />
+        <el-divider content-position="left">常用操作</el-divider>
 
-        <el-collapse>
-          <el-collapse-item title="命令行参数说明" name="params">
+        <div class="command-section">
+          <el-row :gutter="20">
+            <el-col :span="12">
+              <p class="command-title">查看日志：</p>
+              <div class="command-box small">
+                <code>docker-compose -f docker-compose-worker.yaml logs -f</code>
+                <el-button size="small" @click="copyToClipboard('docker-compose -f docker-compose-worker.yaml logs -f')">复制</el-button>
+              </div>
+            </el-col>
+            <el-col :span="12">
+              <p class="command-title">停止探针：</p>
+              <div class="command-box small">
+                <code>docker-compose -f docker-compose-worker.yaml down</code>
+                <el-button size="small" @click="copyToClipboard('docker-compose -f docker-compose-worker.yaml down')">复制</el-button>
+              </div>
+            </el-col>
+          </el-row>
+          <el-row :gutter="20" style="margin-top: 10px">
+            <el-col :span="12">
+              <p class="command-title">重启探针：</p>
+              <div class="command-box small">
+                <code>docker-compose -f docker-compose-worker.yaml restart</code>
+                <el-button size="small" @click="copyToClipboard('docker-compose -f docker-compose-worker.yaml restart')">复制</el-button>
+              </div>
+            </el-col>
+            <el-col :span="12">
+              <p class="command-title">更新探针：</p>
+              <div class="command-box small">
+                <code>docker-compose -f docker-compose-worker.yaml pull && docker-compose -f docker-compose-worker.yaml up -d</code>
+                <el-button size="small" @click="copyToClipboard('docker-compose -f docker-compose-worker.yaml pull && docker-compose -f docker-compose-worker.yaml up -d')">复制</el-button>
+              </div>
+            </el-col>
+          </el-row>
+        </div>
+
+        <el-collapse style="margin-top: 20px">
+          <el-collapse-item title="环境变量说明" name="params">
             <el-table :data="paramTableData" size="small" border>
-              <el-table-column prop="param" label="参数" width="80" />
+              <el-table-column prop="param" label="变量名" width="180" />
               <el-table-column prop="desc" label="说明" />
               <el-table-column prop="default" label="默认值" width="120" />
             </el-table>
@@ -330,7 +386,7 @@ let logIdSet = new Set() // 用于去重
 
 // Worker安装相关
 const installDialogVisible = ref(false)
-const activeOsTab = ref('linux')
+const installOsTab = ref('linux')
 const refreshKeyLoading = ref(false)
 const installInfo = reactive({
   installKey: '',
@@ -340,10 +396,10 @@ const installInfo = reactive({
 
 // 参数说明表格数据
 const paramTableData = [
-  { param: '-k', desc: '安装密钥（必需）', default: '无' },
-  { param: '-s', desc: 'API服务地址', default: 'http://localhost:8888' },
-  { param: '-n', desc: 'Worker名称', default: '自动生成' },
-  { param: '-c', desc: '并发数', default: '5' }
+  { param: 'CSCAN_SERVER', desc: 'API服务地址（必需）', default: '无' },
+  { param: 'CSCAN_KEY', desc: '安装密钥（必需）', default: '无' },
+  { param: 'CSCAN_NAME', desc: 'Worker名称', default: '自动生成' },
+  { param: 'CSCAN_CONCURRENCY', desc: '并发数', default: '5' }
 ]
 
 // 筛选后的日志
@@ -369,6 +425,19 @@ const filteredLogs = computed(() => {
     }
     return true
   })
+})
+
+// PowerShell 命令计算属性
+const psDownloadCmd = computed(() => {
+  return `Invoke-WebRequest -Uri "${installInfo.serverAddr}/static/docker-compose-worker.yaml" -OutFile "docker-compose-worker.yaml"`
+})
+
+const psStartCmd = computed(() => {
+  return `$env:CSCAN_SERVER="${installInfo.serverAddr}"; $env:CSCAN_KEY="${installInfo.installKey}"; docker-compose -f docker-compose-worker.yaml up -d`
+})
+
+const psOneKeyCmd = computed(() => {
+  return `${psDownloadCmd.value}; ${psStartCmd.value}`
 })
 
 // 重命名相关
@@ -647,12 +716,16 @@ async function openInstallDialog() {
 
 async function loadInstallCommand() {
   try {
+    // 自动获取当前浏览器访问的服务器地址
+    const currentUrl = window.location.origin
+    
     const res = await request.post('/worker/install/command', {
-      serverAddr: installInfo.serverAddr || ''
+      serverAddr: currentUrl
     })
     if (res.code === 0) {
       installInfo.installKey = res.installKey
-      installInfo.serverAddr = res.serverAddr
+      // 使用浏览器地址作为服务器地址
+      installInfo.serverAddr = currentUrl
       installInfo.commands = res.commands || {}
     } else {
       ElMessage.error(res.msg || '获取安装命令失败')
@@ -840,6 +913,14 @@ function openConsole(workerName) {
       
       .el-button {
         flex-shrink: 0;
+      }
+
+      &.small {
+        padding: 8px 10px;
+        
+        code {
+          font-size: 11px;
+        }
       }
     }
   }
